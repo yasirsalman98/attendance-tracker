@@ -171,7 +171,7 @@ export default function AdminRecords() {
 
         throw new Error(
           errorData?.error ||
-            'Certificate server is not responding. Start the app with npm run dev so the backend runs too.'
+            'Certificate download failed. Please check Netlify function logs.'
         );
       }
 
@@ -191,7 +191,7 @@ export default function AdminRecords() {
       console.error(error);
       const message =
         error instanceof TypeError
-          ? 'Certificate server is not responding. Start the app with npm run dev so the backend runs too.'
+          ? 'Certificate download failed. Please check Netlify function logs.'
           : error.message || 'Failed to generate certificates.';
 
       setStatus(message);

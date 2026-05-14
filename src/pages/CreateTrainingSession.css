@@ -1,0 +1,240 @@
+.create-session-page {
+  min-height: 100vh;
+  padding: 40px 20px;
+  background: #f5f7f9;
+  color: #17202a;
+}
+
+.create-session-card {
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 32px;
+  background: #ffffff;
+  border: 1px solid #dde3ea;
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+}
+
+.create-session-header {
+  margin-bottom: 28px;
+}
+
+.create-session-header .eyebrow {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #0f766e;
+}
+
+.create-session-header h1 {
+  margin: 0 0 10px;
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1.1;
+}
+
+.create-session-header p {
+  max-width: 680px;
+  margin: 0;
+  color: #52616f;
+  line-height: 1.6;
+}
+
+.create-session-form {
+  display: grid;
+  gap: 20px;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+
+.form-group {
+  display: grid;
+  gap: 8px;
+}
+
+.form-group label,
+.student-link-box label {
+  font-weight: 700;
+  color: #27313d;
+}
+
+.form-group input,
+.form-group textarea,
+.student-link-box input {
+  width: 100%;
+  padding: 13px 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #111827;
+  font: inherit;
+}
+
+.form-group textarea {
+  resize: vertical;
+  min-height: 130px;
+}
+
+.form-group input:focus,
+.form-group textarea:focus,
+.student-link-box input:focus {
+  outline: 3px solid rgba(15, 118, 110, 0.18);
+  border-color: #0f766e;
+}
+
+.primary-button,
+.secondary-button,
+.copy-row button {
+  border: 0;
+  border-radius: 10px;
+  padding: 13px 18px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.primary-button {
+  background: #0f766e;
+  color: #ffffff;
+}
+
+.primary-button:hover {
+  background: #115e59;
+}
+
+.primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.secondary-button {
+  background: #e2e8f0;
+  color: #17202a;
+}
+
+.secondary-button:hover {
+  background: #cbd5e1;
+}
+
+.link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+.alert {
+  padding: 14px 16px;
+  border-radius: 10px;
+  margin-bottom: 20px;
+  font-weight: 600;
+}
+
+.alert-error {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.alert-success {
+  border: 1px solid #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.session-created {
+  display: grid;
+  gap: 24px;
+}
+
+.session-summary {
+  padding: 22px;
+  border: 1px solid #dde3ea;
+  border-radius: 14px;
+  background: #f8fafc;
+}
+
+.session-summary h2 {
+  margin: 0 0 18px;
+}
+
+.session-summary dl {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+}
+
+.session-summary dl div {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 18px;
+}
+
+.session-summary dt {
+  font-weight: 800;
+  color: #334155;
+}
+
+.session-summary dd {
+  margin: 0;
+  color: #111827;
+}
+
+.student-link-box {
+  display: grid;
+  gap: 10px;
+}
+
+.student-link-box p {
+  margin: 0;
+  color: #52616f;
+}
+
+.copy-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+}
+
+.copy-row button {
+  background: #17202a;
+  color: #ffffff;
+}
+
+.copy-row button:hover {
+  background: #0f172a;
+}
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+@media (max-width: 700px) {
+  .create-session-card {
+    padding: 22px;
+  }
+
+  .form-row,
+  .session-summary dl div,
+  .copy-row {
+    grid-template-columns: 1fr;
+  }
+
+  .action-row {
+    flex-direction: column;
+  }
+
+  .primary-button,
+  .secondary-button,
+  .copy-row button {
+    width: 100%;
+  }
+}

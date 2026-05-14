@@ -13,11 +13,11 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
-    "archiver": "^8.0.0",
     "concurrently": "^9.2.1",
     "docxtemplater": "^3.68.7",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "jszip": "^3.10.1",
     "pdfkit": "^0.18.0",
     "pizzip": "^3.2.0",
     "react": "^19.2.6",

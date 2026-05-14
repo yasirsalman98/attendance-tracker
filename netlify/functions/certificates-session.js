@@ -2,8 +2,8 @@ import { createClient } from '@supabase/supabase-js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import PDFDocument from 'pdfkit';
-import { ZipArchive } from 'archiver';
 import PizZip from 'pizzip';
+import JSZip from 'jszip';
 
 const templatePath = path.resolve(
   process.cwd(),
@@ -331,20 +331,13 @@ async function generateCertificatePdfs(session, records, supabase) {
 }
 
 function zipFiles(files) {
-  return new Promise((resolve, reject) => {
-    const archive = new ZipArchive({ zlib: { level: 9 } });
-    const chunks = [];
+  const zip = new JSZip();
 
-    archive.on('data', (chunk) => chunks.push(chunk));
-    archive.on('end', () => resolve(Buffer.concat(chunks)));
-    archive.on('error', reject);
-
-    files.forEach((file) => {
-      archive.append(file.buffer, { name: file.name });
-    });
-
-    archive.finalize();
+  files.forEach((file) => {
+    zip.file(file.name, file.buffer);
   });
+
+  return zip.generateAsync({ type: 'nodebuffer' });
 }
 
 export async function handler(event) {

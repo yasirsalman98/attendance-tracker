@@ -7,8 +7,8 @@ import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import PDFDocument from 'pdfkit';
-import { ZipArchive } from 'archiver';
 import PizZip from 'pizzip';
+import JSZip from 'jszip';
 
 const app = express();
 const port = Number(process.env.PORT || 3001);
@@ -331,26 +331,31 @@ async function generateCertificatePdfs(session, records, workDir, supabase) {
 }
 
 function sendZipResponse(response, files, fileName, cleanup) {
-  const archive = new ZipArchive({ zlib: { level: 9 } });
-
-  response.setHeader('Content-Type', 'application/zip');
-  response.setHeader(
-    'Content-Disposition',
-    `attachment; filename="${fileName}"`
-  );
-
-  archive.on('error', (error) => {
-    response.destroy(error);
-  });
-
-  response.on('close', cleanup);
-  archive.pipe(response);
+  const zip = new JSZip();
 
   files.forEach((file) => {
-    archive.file(file.path, { name: file.name });
+    zip.file(file.name, fsSync.createReadStream(file.path));
   });
 
-  archive.finalize();
+  zip
+    .generateAsync({ type: 'nodebuffer' })
+    .then((zipBuffer) => {
+      response.setHeader('Content-Type', 'application/zip');
+      response.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${fileName}"`
+      );
+      response.send(zipBuffer);
+    })
+    .catch((error) => {
+      console.error('ZIP generation error:', error);
+      if (!response.headersSent) {
+        response.status(500).json({ error: 'Failed to create certificate ZIP.' });
+      } else {
+        response.destroy(error);
+      }
+    })
+    .finally(cleanup);
 }
 
 app.post('/api/certificates/session/:sessionId', async (request, response) => {

@@ -29,6 +29,17 @@ function getDownloadFileName(contentDisposition, fallbackName) {
   return match?.[1] || fallbackName;
 }
 
+function isMissingStorageObjectError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  const statusCode = String(error?.statusCode || error?.status || '');
+
+  return (
+    statusCode === '404' ||
+    message.includes('not found') ||
+    message.includes('does not exist')
+  );
+}
+
 function cleanFileName(value, fallback = 'student-photo') {
   const cleaned = String(value || fallback)
     .trim()
@@ -289,6 +300,18 @@ export default function AdminRecords() {
     setStatus('');
   }
 
+  async function deleteStorageFile(bucketName, filePath) {
+    if (!filePath) return;
+
+    const { error } = await supabase.storage
+      .from(bucketName)
+      .remove([filePath]);
+
+    if (error && !isMissingStorageObjectError(error)) {
+      throw error;
+    }
+  }
+
   async function deleteRecord(record) {
     const confirmed = window.confirm(
       `Delete attendance record for ${record.student_name}? This cannot be undone.`
@@ -302,15 +325,8 @@ export default function AdminRecords() {
     setStatus('');
 
     try {
-      if (record.signature_path) {
-        const storageResult = await supabase.storage
-          .from('signatures')
-          .remove([record.signature_path]);
-
-        if (storageResult.error) {
-          throw storageResult.error;
-        }
-      }
+      await deleteStorageFile('signatures', record.signature_path);
+      await deleteStorageFile('attendance-photos', record.photo_path);
 
       const deleteResult = await supabase
         .from('attendance_records')
@@ -325,10 +341,10 @@ export default function AdminRecords() {
         currentRecords.filter((currentRecord) => currentRecord.id !== record.id)
       );
 
-      setStatus('Record deleted successfully.');
+      setStatus('Record and uploaded files deleted successfully.');
     } catch (error) {
       console.error(error);
-      setStatus(error.message || 'Failed to delete record.');
+      setStatus(error.message || 'Failed to delete record and uploaded files.');
     } finally {
       setDeletingId(null);
     }

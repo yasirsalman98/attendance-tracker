@@ -53,6 +53,10 @@
   gap: 18px;
 }
 
+.session-time-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .form-group {
   display: grid;
   gap: 8px;

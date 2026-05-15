@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../supabaseClient';
 
 function formatDateTime(value) {
@@ -27,6 +27,17 @@ function getSessionValue(session, key) {
 function getDownloadFileName(contentDisposition, fallbackName) {
   const match = contentDisposition?.match(/filename="?([^"]+)"?/i);
   return match?.[1] || fallbackName;
+}
+
+function cleanFileName(value, fallback = 'student-photo') {
+  const cleaned = String(value || fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return cleaned || fallback;
 }
 
 function groupRecordsBySession(records) {
@@ -70,16 +81,195 @@ function groupRecordsBySession(records) {
   return sessionGroups;
 }
 
+function SignaturePreview({ record, onError }) {
+  const [signatureUrl, setSignatureUrl] = useState(record.signature_url || '');
+  const [isLoading, setIsLoading] = useState(Boolean(record.signature_path));
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadSignatureUrl() {
+      if (!record.signature_path) {
+        setSignatureUrl(record.signature_url || '');
+        setIsLoading(false);
+        return;
+      }
+
+      setIsLoading(true);
+
+      const { data, error } = await supabase.storage
+        .from('signatures')
+        .createSignedUrl(record.signature_path, 300);
+
+      if (!isActive) return;
+
+      if (error || !data?.signedUrl) {
+        console.error('Signature signed URL error:', error);
+        setSignatureUrl(record.signature_url || '');
+        setIsLoading(false);
+
+        if (!record.signature_url) {
+          onError('Unable to load student signature.');
+        }
+
+        return;
+      }
+
+      setSignatureUrl(data.signedUrl);
+      setIsLoading(false);
+    }
+
+    loadSignatureUrl();
+
+    return () => {
+      isActive = false;
+    };
+  }, [record.signature_path, record.signature_url, onError]);
+
+  if (isLoading) {
+    return <span className="muted">Loading...</span>;
+  }
+
+  if (!signatureUrl) {
+    return 'N/A';
+  }
+
+  return (
+    <img
+      src={signatureUrl}
+      alt={`Signature for ${record.student_name}`}
+      className="signature-preview"
+    />
+  );
+}
+
+function StudentPhotoThumbnail({ record, onOpen, onError }) {
+  const [photoUrl, setPhotoUrl] = useState('');
+  const [isLoading, setIsLoading] = useState(Boolean(record.photo_path));
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadPhotoUrl() {
+      if (!record.photo_path) {
+        setPhotoUrl('');
+        setIsLoading(false);
+        return;
+      }
+
+      setIsLoading(true);
+
+      const { data, error } = await supabase.storage
+        .from('attendance-photos')
+        .createSignedUrl(record.photo_path, 300);
+
+      if (!isActive) return;
+
+      if (error || !data?.signedUrl) {
+        console.error('Photo signed URL error:', error);
+        setPhotoUrl('');
+        setIsLoading(false);
+        onError('Unable to load student photo.');
+        return;
+      }
+
+      setPhotoUrl(data.signedUrl);
+      setIsLoading(false);
+    }
+
+    loadPhotoUrl();
+
+    return () => {
+      isActive = false;
+    };
+  }, [record.photo_path, onError]);
+
+  if (!record.photo_path) {
+    return 'N/A';
+  }
+
+  if (isLoading) {
+    return <span className="muted">Loading...</span>;
+  }
+
+  if (!photoUrl) {
+    return 'N/A';
+  }
+
+  const altText = `Photo for ${record.student_name}`;
+
+  return (
+    <button
+      type="button"
+      className="student-photo-button"
+      onClick={() => onOpen(photoUrl, altText, record.student_name)}
+      aria-label={`Open ${altText}`}
+    >
+      <img src={photoUrl} alt={altText} className="student-photo-thumbnail" />
+    </button>
+  );
+}
+
 export default function AdminRecords() {
   const [records, setRecords] = useState([]);
   const [status, setStatus] = useState('Loading records...');
   const [deletingId, setDeletingId] = useState(null);
   const [generatingCertificatesId, setGeneratingCertificatesId] = useState(null);
+  const [selectedPhotoUrl, setSelectedPhotoUrl] = useState('');
+  const [selectedPhotoAlt, setSelectedPhotoAlt] = useState('');
+  const [selectedPhotoFileName, setSelectedPhotoFileName] = useState('');
+  const [photoModalError, setPhotoModalError] = useState('');
 
   const groupedRecords = useMemo(() => groupRecordsBySession(records), [records]);
+  const handleMediaLoadError = useCallback((message) => {
+    setPhotoModalError(message);
+    setStatus(message);
+  }, []);
+
+  function openPhotoModal(photoUrl, altText, studentName) {
+    setPhotoModalError('');
+    setSelectedPhotoUrl(photoUrl);
+    setSelectedPhotoAlt(altText);
+    setSelectedPhotoFileName(`${cleanFileName(studentName)}-photo.jpg`);
+  }
+
+  function closePhotoModal() {
+    setSelectedPhotoUrl('');
+    setSelectedPhotoAlt('');
+    setSelectedPhotoFileName('');
+    setPhotoModalError('');
+  }
+
+  async function downloadSelectedPhoto() {
+    if (!selectedPhotoUrl) return;
+
+    try {
+      const response = await fetch(selectedPhotoUrl);
+
+      if (!response.ok) {
+        throw new Error('Photo download failed.');
+      }
+
+      const blob = await response.blob();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+
+      link.href = objectUrl;
+      link.download = selectedPhotoFileName || 'student-photo.jpg';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      console.error('Photo download error:', error);
+      setPhotoModalError('Unable to download student photo.');
+      setStatus('Unable to download student photo.');
+    }
+  }
 
   async function loadRecords() {
     setStatus('Loading records...');
+    setPhotoModalError('');
 
     const result = await supabase
       .from('attendance_records')
@@ -219,7 +409,9 @@ export default function AdminRecords() {
         </div>
       </div>
 
-      {status && <p className="status">{status}</p>}
+      {(status || photoModalError) && (
+        <p className="status">{status || photoModalError}</p>
+      )}
 
       {!status && records.length === 0 && (
         <p className="muted">No attendance records found yet.</p>
@@ -278,6 +470,16 @@ export default function AdminRecords() {
                 </div>
 
                 <div>
+                  <dt>Class End Time</dt>
+                  <dd>{formatTime(group.session?.time_stopped)}</dd>
+                </div>
+
+                <div>
+                  <dt>Expires At</dt>
+                  <dd>{formatDateTime(group.session?.expires_at)}</dd>
+                </div>
+
+                <div>
                   <dt>Total Students</dt>
                   <dd>{group.records.length}</dd>
                 </div>
@@ -295,6 +497,7 @@ export default function AdminRecords() {
                       <th>Longitude</th>
                       <th>Accuracy</th>
                       <th>Signature</th>
+                      <th>Photo</th>
                       <th>Action</th>
                     </tr>
                   </thead>
@@ -302,7 +505,28 @@ export default function AdminRecords() {
                   <tbody>
                     {group.records.map((record) => (
                       <tr key={record.id}>
-                        <td>{record.student_name}</td>
+                        <td>
+                          <div>{record.student_name}</div>
+
+                          {record.is_suspicious && (
+                            <div className="suspicious-warning">
+                              <span className="suspicious-icon" aria-hidden="true">
+                                ⚠
+                              </span>
+
+                              <div className="suspicious-copy">
+                                <div className="suspicious-title">
+                                  Duplicate device
+                                </div>
+
+                                <div className="suspicious-reason">
+                                  {record.suspicious_reason ||
+                                    'Same device already submitted for another student in this session'}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </td>
                         <td>{record.student_email}</td>
                         <td>{record.company || 'N/A'}</td>
                         <td>{formatDateTime(record.signed_at)}</td>
@@ -310,10 +534,16 @@ export default function AdminRecords() {
                         <td>{record.longitude}</td>
                         <td>{formatAccuracy(record.location_accuracy)}</td>
                         <td>
-                          <img
-                            src={record.signature_url}
-                            alt={`Signature for ${record.student_name}`}
-                            className="signature-preview"
+                          <SignaturePreview
+                            record={record}
+                            onError={handleMediaLoadError}
+                          />
+                        </td>
+                        <td>
+                          <StudentPhotoThumbnail
+                            record={record}
+                            onOpen={openPhotoModal}
+                            onError={handleMediaLoadError}
                           />
                         </td>
                         <td>
@@ -333,6 +563,37 @@ export default function AdminRecords() {
               </div>
             </section>
           ))}
+        </div>
+      )}
+
+      {selectedPhotoUrl && (
+        <div
+          className="photo-modal-overlay"
+          onClick={closePhotoModal}
+          role="presentation"
+        >
+          <div className="photo-modal" onClick={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              className="photo-modal-close"
+              onClick={closePhotoModal}
+              aria-label="Close photo"
+            >
+              X
+            </button>
+
+            <img
+              src={selectedPhotoUrl}
+              alt={selectedPhotoAlt}
+              className="photo-modal-image"
+            />
+
+            <div className="photo-modal-actions">
+              <button type="button" onClick={downloadSelectedPhoto}>
+                Download Photo
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </section>

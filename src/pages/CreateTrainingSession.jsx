@@ -16,11 +16,39 @@ function getCurrentTimeValue() {
   return now.toTimeString().slice(0, 5);
 }
 
+function getDateTimeLocalValue(date = new Date()) {
+  const offset = date.getTimezoneOffset();
+  const localDate = new Date(date.getTime() - offset * 60 * 1000);
+  return localDate.toISOString().slice(0, 16);
+}
+
+function getDefaultExpirationValue() {
+  return getDateTimeLocalValue(new Date(Date.now() + 2 * 60 * 60 * 1000));
+}
+
 function combineDateAndTimeToIso(dateValue, timeValue) {
   if (!dateValue || !timeValue) return null;
 
   const localDateTime = new Date(`${dateValue}T${timeValue}:00`);
   return localDateTime.toISOString();
+}
+
+function getLocalDateTimeIso(dateTimeValue) {
+  if (!dateTimeValue) return null;
+
+  const localDateTime = new Date(dateTimeValue);
+  if (Number.isNaN(localDateTime.getTime())) return null;
+
+  return localDateTime.toISOString();
+}
+
+function formatDateTime(value) {
+  if (!value) return 'N/A';
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'N/A';
+
+  return date.toLocaleString();
 }
 
 export default function CreateTrainingSession() {
@@ -32,6 +60,8 @@ export default function CreateTrainingSession() {
 
   const [trainingDate, setTrainingDate] = useState(getTodayDateValue());
   const [timeStarted, setTimeStarted] = useState(getCurrentTimeValue());
+  const [classEndTime, setClassEndTime] = useState('');
+  const [expiresAt, setExpiresAt] = useState(getDefaultExpirationValue());
 
   const [createdSession, setCreatedSession] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -78,17 +108,46 @@ export default function CreateTrainingSession() {
       return;
     }
 
+    if (!expiresAt) {
+      setErrorMessage('Attendance link expiration time is required.');
+      return;
+    }
+
+    const startIso = combineDateAndTimeToIso(trainingDate, timeStarted);
+    const classEndIso = classEndTime
+      ? combineDateAndTimeToIso(trainingDate, classEndTime)
+      : null;
+    const expirationIso = getLocalDateTimeIso(expiresAt);
+
+    if (
+      classEndIso &&
+      new Date(classEndIso).getTime() <= new Date(startIso).getTime()
+    ) {
+      setErrorMessage('Class end time must be after the start time.');
+      return;
+    }
+
+    if (!expirationIso) {
+      setErrorMessage('Attendance link expiration time is invalid.');
+      return;
+    }
+
+    if (new Date(expirationIso).getTime() <= new Date(startIso).getTime()) {
+      setErrorMessage('Attendance link expiration time must be after the session start time.');
+      return;
+    }
+
     setSubmitting(true);
 
     try {
-      const startIso = combineDateAndTimeToIso(trainingDate, timeStarted);
-
       const { data, error } = await supabase
         .from('training_sessions')
         .insert({
           course_name: cleanCourseName,
           training_date: trainingDate,
           time_started: startIso,
+          time_stopped: classEndIso,
+          expires_at: expirationIso,
           company_name: cleanCompanyName || null,
           training_location: cleanTrainingLocation || null,
           trainer_name: cleanTrainerName,
@@ -130,6 +189,8 @@ export default function CreateTrainingSession() {
     setCourseOutline('');
     setTrainingDate(getTodayDateValue());
     setTimeStarted(getCurrentTimeValue());
+    setClassEndTime('');
+    setExpiresAt(getDefaultExpirationValue());
     setCreatedSession(null);
     setCopied(false);
     setErrorMessage('');
@@ -167,7 +228,7 @@ export default function CreateTrainingSession() {
               />
             </div>
 
-            <div className="form-row">
+            <div className="form-row session-time-row">
               <div className="form-group">
                 <label htmlFor="trainingDate">Training Date *</label>
                 <input
@@ -189,6 +250,27 @@ export default function CreateTrainingSession() {
                   required
                 />
               </div>
+
+              <div className="form-group">
+                <label htmlFor="classEndTime">Class End Time</label>
+                <input
+                  id="classEndTime"
+                  type="time"
+                  value={classEndTime}
+                  onChange={(event) => setClassEndTime(event.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="expiresAt">Attendance Link Expires At *</label>
+              <input
+                id="expiresAt"
+                type="datetime-local"
+                value={expiresAt}
+                onChange={(event) => setExpiresAt(event.target.value)}
+                required
+              />
             </div>
 
             <div className="form-group">
@@ -258,6 +340,21 @@ export default function CreateTrainingSession() {
                 <div>
                   <dt>Date</dt>
                   <dd>{createdSession.training_date}</dd>
+                </div>
+
+                <div>
+                  <dt>Time Started</dt>
+                  <dd>{formatDateTime(createdSession.time_started)}</dd>
+                </div>
+
+                <div>
+                  <dt>Class End Time</dt>
+                  <dd>{formatDateTime(createdSession.time_stopped)}</dd>
+                </div>
+
+                <div>
+                  <dt>Expires At</dt>
+                  <dd>{formatDateTime(createdSession.expires_at)}</dd>
                 </div>
 
                 <div>

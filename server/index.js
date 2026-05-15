@@ -14,8 +14,7 @@ const app = express();
 const port = Number(process.env.PORT || 3001);
 
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-const supabaseServerKey =
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+const supabaseServerKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const templatePath = path.resolve('server/templates/certificate_template.docx');
 const CERT_LAYOUT = {
   studentName: {
@@ -94,6 +93,29 @@ function formatDate(value) {
   }).format(date);
 }
 
+function formatStudentName(name) {
+  const value = String(name || '').trim();
+
+  if (!value) return 'Student';
+
+  return value
+    .split(/(\s+)/)
+    .map((part) => {
+      if (/^\s+$/.test(part)) return part;
+
+      return part
+        .split('-')
+        .map((namePart) => {
+          if (!namePart) return namePart;
+
+          const lowerNamePart = namePart.toLowerCase();
+          return lowerNamePart.charAt(0).toUpperCase() + lowerNamePart.slice(1);
+        })
+        .join('-');
+    })
+    .join('');
+}
+
 function cleanFileName(value, fallback = 'certificate') {
   const cleaned = String(value || fallback)
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')
@@ -121,7 +143,7 @@ function getUniquePdfName(studentName, usedNames) {
 
 function getTemplateData(session, record) {
   return {
-    name: record.student_name || 'Student',
+    name: formatStudentName(record.student_name),
     completed: session.course_name || 'Training Session',
     date: formatDate(session.training_date),
     printedName: session.trainer_name || 'N/A',
@@ -225,20 +247,28 @@ function drawSignatureImage(doc, imageBuffer, layout) {
 }
 
 async function fetchSignatureImage(record, supabase) {
-  let signatureUrl = record.signature_url;
+  if (record.signature_path) {
+    try {
+      const { data, error } = await supabase.storage
+        .from('signatures')
+        .download(record.signature_path);
 
-  if (!signatureUrl && record.signature_path) {
-    const publicUrlResult = supabase.storage
-      .from('signatures')
-      .getPublicUrl(record.signature_path);
+      if (error) {
+        throw error;
+      }
 
-    signatureUrl = publicUrlResult.data?.publicUrl;
+      if (data) {
+        return Buffer.from(await data.arrayBuffer());
+      }
+    } catch (error) {
+      console.error('Private signature download error:', error);
+    }
   }
 
-  if (!signatureUrl) return null;
+  if (!record.signature_url) return null;
 
   try {
-    const response = await fetch(signatureUrl);
+    const response = await fetch(record.signature_url);
 
     if (!response.ok) return null;
 
@@ -314,7 +344,7 @@ async function generateCertificatePdfs(session, records, workDir, supabase) {
 
   for (const record of records) {
     const data = getTemplateData(session, record);
-    const pdfName = getUniquePdfName(record.student_name, usedNames);
+    const pdfName = getUniquePdfName(data.name, usedNames);
     const signatureImage = await fetchSignatureImage(record, supabase);
     const pdfBuffer = await createCertificatePdfBuffer(
       data,

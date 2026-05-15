@@ -70,8 +70,7 @@ function jsonResponse(statusCode, error) {
 
 function getSupabaseClient() {
   const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-  const supabaseServerKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+  const supabaseServerKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!supabaseUrl || !supabaseServerKey) {
     return null;
@@ -96,6 +95,29 @@ function formatDate(value) {
     day: '2-digit',
     year: 'numeric',
   }).format(date);
+}
+
+function formatStudentName(name) {
+  const value = String(name || '').trim();
+
+  if (!value) return 'Student';
+
+  return value
+    .split(/(\s+)/)
+    .map((part) => {
+      if (/^\s+$/.test(part)) return part;
+
+      return part
+        .split('-')
+        .map((namePart) => {
+          if (!namePart) return namePart;
+
+          const lowerNamePart = namePart.toLowerCase();
+          return lowerNamePart.charAt(0).toUpperCase() + lowerNamePart.slice(1);
+        })
+        .join('-');
+    })
+    .join('');
 }
 
 function cleanFileName(value, fallback = 'certificate') {
@@ -125,7 +147,7 @@ function getUniquePdfName(studentName, usedNames) {
 
 function getTemplateData(session, record) {
   return {
-    name: record.student_name || 'Student',
+    name: formatStudentName(record.student_name),
     completed: session.course_name || 'Training Session',
     date: formatDate(session.training_date),
     printedName: session.trainer_name || 'N/A',
@@ -229,20 +251,28 @@ function drawSignatureImage(doc, imageBuffer, layout) {
 }
 
 async function fetchSignatureImage(record, supabase) {
-  let signatureUrl = record.signature_url;
+  if (record.signature_path) {
+    try {
+      const { data, error } = await supabase.storage
+        .from('signatures')
+        .download(record.signature_path);
 
-  if (!signatureUrl && record.signature_path) {
-    const publicUrlResult = supabase.storage
-      .from('signatures')
-      .getPublicUrl(record.signature_path);
+      if (error) {
+        throw error;
+      }
 
-    signatureUrl = publicUrlResult.data?.publicUrl;
+      if (data) {
+        return Buffer.from(await data.arrayBuffer());
+      }
+    } catch (error) {
+      console.error('Private signature download error:', error);
+    }
   }
 
-  if (!signatureUrl) return null;
+  if (!record.signature_url) return null;
 
   try {
-    const response = await fetch(signatureUrl);
+    const response = await fetch(record.signature_url);
 
     if (!response.ok) return null;
 
@@ -322,7 +352,7 @@ async function generateCertificatePdfs(session, records, supabase) {
     const buffer = await createCertificatePdfBuffer(data, template, signatureImage);
 
     pdfFiles.push({
-      name: getUniquePdfName(record.student_name, usedNames),
+      name: getUniquePdfName(data.name, usedNames),
       buffer,
     });
   }

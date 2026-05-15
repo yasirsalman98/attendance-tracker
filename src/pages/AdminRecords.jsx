@@ -51,6 +51,18 @@ function cleanFileName(value, fallback = 'student-photo') {
   return cleaned || fallback;
 }
 
+function getWalletCardsUrl(sessionId) {
+  const isLocalHost =
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1';
+
+  if (isLocalHost) {
+    return `http://localhost:3001/api/wallet-cards/session/${sessionId}`;
+  }
+
+  return `/.netlify/functions/wallet-cards-session?sessionId=${sessionId}`;
+}
+
 function groupRecordsBySession(records) {
   const groupsById = new Map();
   const unassignedRecords = [];
@@ -419,12 +431,9 @@ export default function AdminRecords() {
     setGeneratingWalletCardsId(group.id);
 
     try {
-      const response = await fetch(
-        `/.netlify/functions/wallet-cards-session?sessionId=${group.id}`,
-        {
-          method: 'POST',
-        }
-      );
+      const response = await fetch(getWalletCardsUrl(group.id), {
+        method: 'POST',
+      });
 
       if (!response.ok) {
         const contentType = response.headers.get('Content-Type') || '';

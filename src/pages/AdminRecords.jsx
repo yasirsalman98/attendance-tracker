@@ -226,6 +226,7 @@ export default function AdminRecords() {
   const [status, setStatus] = useState('Loading records...');
   const [deletingId, setDeletingId] = useState(null);
   const [generatingCertificatesId, setGeneratingCertificatesId] = useState(null);
+  const [generatingWalletCardsId, setGeneratingWalletCardsId] = useState(null);
   const [selectedPhotoUrl, setSelectedPhotoUrl] = useState('');
   const [selectedPhotoAlt, setSelectedPhotoAlt] = useState('');
   const [selectedPhotoFileName, setSelectedPhotoFileName] = useState('');
@@ -406,6 +407,62 @@ export default function AdminRecords() {
     }
   }
 
+  async function downloadSessionWalletCards(group) {
+    if (group.id === 'unassigned') return;
+
+    if (group.records.length === 0) {
+      setStatus('No students found for this session.');
+      return;
+    }
+
+    setStatus('');
+    setGeneratingWalletCardsId(group.id);
+
+    try {
+      const response = await fetch(
+        `/.netlify/functions/wallet-cards-session?sessionId=${group.id}`,
+        {
+          method: 'POST',
+        }
+      );
+
+      if (!response.ok) {
+        const contentType = response.headers.get('Content-Type') || '';
+        const errorData = contentType.includes('application/json')
+          ? await response.json().catch(() => null)
+          : null;
+
+        throw new Error(
+          errorData?.error ||
+            'Wallet card download failed. Please check Netlify function logs.'
+        );
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const contentDisposition = response.headers.get('Content-Disposition');
+      const fallbackFileName = 'wallet-cards.zip';
+      const link = document.createElement('a');
+
+      link.href = url;
+      link.download = getDownloadFileName(contentDisposition, fallbackFileName);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error(error);
+      const message =
+        error instanceof TypeError
+          ? 'Wallet card download failed. Please check Netlify function logs.'
+          : error.message || 'Failed to generate wallet cards.';
+
+      setStatus(message);
+    } finally {
+      setGeneratingWalletCardsId(null);
+    }
+  }
+
   useEffect(() => {
     loadRecords();
   }, []);
@@ -442,19 +499,35 @@ export default function AdminRecords() {
 
                 <div className="session-card-actions">
                   {group.id !== 'unassigned' && (
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      onClick={() => downloadSessionCertificates(group)}
-                      disabled={
-                        group.records.length === 0 ||
-                        generatingCertificatesId === group.id
-                      }
-                    >
-                      {generatingCertificatesId === group.id
-                        ? 'Generating certificates...'
-                        : 'Download Certificates'}
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => downloadSessionCertificates(group)}
+                        disabled={
+                          group.records.length === 0 ||
+                          generatingCertificatesId === group.id
+                        }
+                      >
+                        {generatingCertificatesId === group.id
+                          ? 'Generating certificates...'
+                          : 'Download Certificates'}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => downloadSessionWalletCards(group)}
+                        disabled={
+                          group.records.length === 0 ||
+                          generatingWalletCardsId === group.id
+                        }
+                      >
+                        {generatingWalletCardsId === group.id
+                          ? 'Generating wallet cards...'
+                          : 'Download Wallet Cards'}
+                      </button>
+                    </>
                   )}
                 </div>
               </div>

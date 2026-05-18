@@ -1,6 +1,7 @@
 // src/pages/CreateTrainingSession.jsx
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import SignaturePad from 'signature_pad';
 import { supabase } from '../supabaseClient';
 import './CreateTrainingSession.css';
 
@@ -51,7 +52,23 @@ function formatDateTime(value) {
   return date.toLocaleString();
 }
 
+function dataUrlToBlob(dataUrl) {
+  const [metadata, base64Data] = dataUrl.split(',');
+  const mimeMatch = metadata.match(/data:(.*);base64/);
+  const mimeType = mimeMatch?.[1] || 'image/png';
+  const binary = atob(base64Data);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return new Blob([bytes], { type: mimeType });
+}
+
 export default function CreateTrainingSession() {
+  const trainerSignatureCanvasRef = useRef(null);
+  const trainerSignaturePadRef = useRef(null);
   const [courseName, setCourseName] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [trainingLocation, setTrainingLocation] = useState('');
@@ -65,6 +82,7 @@ export default function CreateTrainingSession() {
 
   const [createdSession, setCreatedSession] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [hasTrainerSignature, setHasTrainerSignature] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
@@ -74,6 +92,49 @@ export default function CreateTrainingSession() {
 
     return `${window.location.origin}/attendance/session/${createdSession.id}`;
   }, [createdSession]);
+
+  useEffect(() => {
+    if (createdSession) return undefined;
+
+    const canvas = trainerSignatureCanvasRef.current;
+
+    if (!canvas) return undefined;
+
+    function resizeCanvas() {
+      const ratio = Math.max(window.devicePixelRatio || 1, 1);
+      const parentWidth = canvas.parentElement.offsetWidth;
+
+      canvas.width = parentWidth * ratio;
+      canvas.height = 160 * ratio;
+      canvas.getContext('2d').scale(ratio, ratio);
+      setHasTrainerSignature(false);
+    }
+
+    resizeCanvas();
+
+    const signaturePad = new SignaturePad(canvas, {
+      backgroundColor: 'rgb(255, 255, 255)',
+      penColor: 'rgb(0, 0, 0)',
+    });
+    const handleSignatureEnd = () =>
+      setHasTrainerSignature(!signaturePad.isEmpty());
+
+    trainerSignaturePadRef.current = signaturePad;
+    signaturePad.addEventListener('endStroke', handleSignatureEnd);
+    window.addEventListener('resize', resizeCanvas);
+
+    return () => {
+      window.removeEventListener('resize', resizeCanvas);
+      signaturePad.removeEventListener('endStroke', handleSignatureEnd);
+      signaturePad.off();
+      trainerSignaturePadRef.current = null;
+    };
+  }, [createdSession]);
+
+  function clearTrainerSignature() {
+    trainerSignaturePadRef.current?.clear();
+    setHasTrainerSignature(false);
+  }
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -95,6 +156,11 @@ export default function CreateTrainingSession() {
 
     if (!cleanTrainerName) {
       setErrorMessage('Trainer name is required.');
+      return;
+    }
+
+    if (!trainerSignaturePadRef.current || trainerSignaturePadRef.current.isEmpty()) {
+      setErrorMessage('Trainer signature is required.');
       return;
     }
 
@@ -140,6 +206,26 @@ export default function CreateTrainingSession() {
     setSubmitting(true);
 
     try {
+      let trainerSignaturePath = null;
+
+      const trainerSignatureDataUrl =
+        trainerSignaturePadRef.current.toDataURL('image/png');
+      const trainerSignatureBlob = dataUrlToBlob(trainerSignatureDataUrl);
+      const fileName = `${Date.now()}-${crypto.randomUUID()}.png`;
+
+      trainerSignaturePath = `trainer-signatures/${fileName}`;
+
+      const uploadResult = await supabase.storage
+        .from('signatures')
+        .upload(trainerSignaturePath, trainerSignatureBlob, {
+          contentType: 'image/png',
+          upsert: false,
+        });
+
+      if (uploadResult.error) {
+        throw uploadResult.error;
+      }
+
       const { data, error } = await supabase
         .from('training_sessions')
         .insert({
@@ -151,6 +237,7 @@ export default function CreateTrainingSession() {
           company_name: cleanCompanyName || null,
           training_location: cleanTrainingLocation || null,
           trainer_name: cleanTrainerName,
+          trainer_signature_path: trainerSignaturePath,
           course_outline: cleanCourseOutline || null,
         })
         .select()
@@ -191,6 +278,7 @@ export default function CreateTrainingSession() {
     setTimeStarted(getCurrentTimeValue());
     setClassEndTime('');
     setExpiresAt(getDefaultExpirationValue());
+    clearTrainerSignature();
     setCreatedSession(null);
     setCopied(false);
     setErrorMessage('');
@@ -308,6 +396,26 @@ export default function CreateTrainingSession() {
             </div>
 
             <div className="form-group">
+              <label>Trainer Signature *</label>
+              <p className="helper-text">
+                Required. This signature appears on generated certificates and wallet cards.
+              </p>
+
+              <div className="trainer-signature-box">
+                <canvas ref={trainerSignatureCanvasRef} />
+              </div>
+
+              <button
+                type="button"
+                className="secondary-button clear-signature-button"
+                onClick={clearTrainerSignature}
+                disabled={!hasTrainerSignature}
+              >
+                Clear Trainer Signature
+              </button>
+            </div>
+
+            <div className="form-group">
               <label htmlFor="courseOutline">Course Outline</label>
               <textarea
                 id="courseOutline"
@@ -370,6 +478,15 @@ export default function CreateTrainingSession() {
                 <div>
                   <dt>Trainer</dt>
                   <dd>{createdSession.trainer_name}</dd>
+                </div>
+
+                <div>
+                  <dt>Trainer Signature</dt>
+                  <dd>
+                    {createdSession.trainer_signature_path
+                      ? 'Provided'
+                      : 'Not provided'}
+                  </dd>
                 </div>
               </dl>
             </div>

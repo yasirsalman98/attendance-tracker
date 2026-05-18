@@ -17,6 +17,8 @@
     "docxtemplater": "^3.68.7",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.8",
     "jszip": "^3.10.1",
     "pdfkit": "^0.18.0",
     "pizzip": "^3.2.0",

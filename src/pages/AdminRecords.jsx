@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import { supabase } from '../supabaseClient';
 
 function formatDateTime(value) {
@@ -51,16 +53,64 @@ function cleanFileName(value, fallback = 'student-photo') {
   return cleaned || fallback;
 }
 
-function getWalletCardsUrl(sessionId) {
-  const isLocalHost =
-    window.location.hostname === 'localhost' ||
-    window.location.hostname === '127.0.0.1';
+function getClassArchivePdfFileName(session) {
+  const courseName = cleanFileName(session?.course_name, 'training-session');
+  const trainingDate = session?.training_date || new Date().toISOString().split('T')[0];
 
-  if (isLocalHost) {
+  return `${courseName}-class-archive-${trainingDate}.pdf`;
+}
+
+function isLocalHost() {
+  return (
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1'
+  );
+}
+
+function getCertificatesUrl(sessionId) {
+  if (isLocalHost()) {
+    return `http://localhost:3001/api/certificates/session/${sessionId}`;
+  }
+
+  return `/.netlify/functions/certificates-session?sessionId=${sessionId}`;
+}
+
+function getWalletCardsUrl(sessionId) {
+  if (isLocalHost()) {
     return `http://localhost:3001/api/wallet-cards/session/${sessionId}`;
   }
 
   return `/.netlify/functions/wallet-cards-session?sessionId=${sessionId}`;
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      resolve(result.includes(',') ? result.split(',').pop() : result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function uploadPdfToSharePoint(doc, fileName) {
+  const pdfBlob = doc.output('blob');
+  const pdfBase64 = await blobToBase64(pdfBlob);
+  const response = await fetch('/.netlify/functions/upload-class-pdf', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileName, pdfBase64 }),
+  });
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok || !data?.success) {
+    throw new Error(data?.error || 'SharePoint upload failed.');
+  }
+
+  return data;
 }
 
 function groupRecordsBySession(records) {
@@ -239,6 +289,7 @@ export default function AdminRecords() {
   const [deletingId, setDeletingId] = useState(null);
   const [generatingCertificatesId, setGeneratingCertificatesId] = useState(null);
   const [generatingWalletCardsId, setGeneratingWalletCardsId] = useState(null);
+  const [archivingClassId, setArchivingClassId] = useState(null);
   const [selectedPhotoUrl, setSelectedPhotoUrl] = useState('');
   const [selectedPhotoAlt, setSelectedPhotoAlt] = useState('');
   const [selectedPhotoFileName, setSelectedPhotoFileName] = useState('');
@@ -375,12 +426,9 @@ export default function AdminRecords() {
     setGeneratingCertificatesId(group.id);
 
     try {
-      const response = await fetch(
-        `/.netlify/functions/certificates-session?sessionId=${group.id}`,
-        {
-          method: 'POST',
-        }
-      );
+      const response = await fetch(getCertificatesUrl(group.id), {
+        method: 'POST',
+      });
 
       if (!response.ok) {
         const contentType = response.headers.get('Content-Type') || '';
@@ -472,6 +520,234 @@ export default function AdminRecords() {
     }
   }
 
+  async function downloadArchiveImage(bucketName, filePath, fallbackUrl) {
+    try {
+      if (filePath) {
+        const { data, error } = await supabase.storage
+          .from(bucketName)
+          .download(filePath);
+
+        if (!error && data) {
+          return await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(data);
+          });
+        }
+      }
+
+      if (fallbackUrl) {
+        const response = await fetch(fallbackUrl);
+
+        if (response.ok) {
+          const blob = await response.blob();
+
+          return await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        }
+      }
+    } catch (error) {
+      console.error(`${bucketName} archive image load error:`, error);
+    }
+
+    return null;
+  }
+
+  async function downloadClassArchivePdf(group) {
+    if (group.id === 'unassigned' || !group.session) return;
+
+    if (group.records.length === 0) {
+      setStatus('No attendance records to archive.');
+      return;
+    }
+
+    setStatus('');
+    setArchivingClassId(group.id);
+
+    try {
+      const { session } = group;
+      const doc = new jsPDF({
+        orientation: 'landscape',
+        unit: 'pt',
+        format: 'letter',
+      });
+      const generatedAt = new Date().toLocaleString();
+      const tableRows = [];
+      const tableImages = [];
+
+      for (const record of group.records) {
+        const photoImage = await downloadArchiveImage(
+          'attendance-photos',
+          record.photo_path
+        );
+        const signatureImage = await downloadArchiveImage(
+          'signatures',
+          record.signature_path,
+          record.signature_url
+        );
+
+        tableImages.push({ photoImage, signatureImage });
+        tableRows.push([
+          record.student_name || '',
+          record.student_email || '',
+          record.company || 'N/A',
+          formatDateTime(record.signed_at),
+          record.latitude ?? 'N/A',
+          record.longitude ?? 'N/A',
+          formatAccuracy(record.location_accuracy),
+          photoImage ? '' : 'N/A',
+          signatureImage ? '' : 'N/A',
+          record.is_suspicious ? 'Yes' : 'No',
+          record.suspicious_reason || '',
+          record.device_id || '',
+          record.user_agent || '',
+        ]);
+      }
+      const classInfoRows = [
+        ['Course Name', session.course_name || 'N/A'],
+        ['Training Date', session.training_date || 'N/A'],
+        ['Time Started', formatDateTime(session.time_started)],
+        ['Class End Time', formatDateTime(session.time_stopped)],
+        ['Attendance Link Expires At', formatDateTime(session.expires_at)],
+        ['Trainer Name', session.trainer_name || 'N/A'],
+        ['Company Name', session.company_name || 'N/A'],
+        ['Training Location', session.training_location || 'N/A'],
+        ['Course Outline', session.course_outline || 'N/A'],
+        ['Total Students Attended', String(group.records.length)],
+        ['Generated At', generatedAt],
+      ];
+
+      doc.setTextColor('#036f5e');
+      doc.setFontSize(20);
+      doc.setFont(undefined, 'bold');
+      doc.text('Attendance Class Archive', 40, 42);
+
+      doc.setTextColor('#111827');
+      doc.setFontSize(10);
+      doc.setFont(undefined, 'normal');
+      doc.text(`Generated date/time: ${generatedAt}`, 40, 64);
+      doc.text(`Total number of records: ${group.records.length}`, 40, 80);
+
+      autoTable(doc, {
+        startY: 100,
+        head: [['Class Information', '']],
+        body: classInfoRows,
+        theme: 'grid',
+        headStyles: {
+          fillColor: '#036f5e',
+          textColor: '#ffffff',
+          fontStyle: 'bold',
+        },
+        styles: {
+          fontSize: 8,
+          cellPadding: 4,
+          overflow: 'linebreak',
+          valign: 'middle',
+        },
+        columnStyles: {
+          0: { cellWidth: 170, fontStyle: 'bold' },
+          1: { cellWidth: 555 },
+        },
+        margin: { left: 40, right: 40 },
+      });
+
+      autoTable(doc, {
+        startY: doc.lastAutoTable.finalY + 18,
+        head: [[
+          'Student Name',
+          'Student Email',
+          'Company',
+          'Signed Date/Time',
+          'Latitude',
+          'Longitude',
+          'Location Accuracy',
+          'Student Photo',
+          'Signature',
+          'Possible Duplicate Device',
+          'Suspicious Reason',
+          'Device ID',
+          'User Agent',
+        ]],
+        body: tableRows,
+        theme: 'grid',
+        headStyles: {
+          fillColor: '#036f5e',
+          textColor: '#ffffff',
+          fontStyle: 'bold',
+        },
+        styles: {
+          fontSize: 5.6,
+          cellPadding: 3,
+          overflow: 'linebreak',
+          valign: 'middle',
+          minCellHeight: 44,
+        },
+        columnStyles: {
+          0: { cellWidth: 55 },
+          1: { cellWidth: 75 },
+          2: { cellWidth: 45 },
+          3: { cellWidth: 65 },
+          4: { cellWidth: 47 },
+          5: { cellWidth: 47 },
+          6: { cellWidth: 45 },
+          7: { cellWidth: 45 },
+          8: { cellWidth: 55 },
+          9: { cellWidth: 45 },
+          10: { cellWidth: 55 },
+          11: { cellWidth: 45 },
+          12: { cellWidth: 88 },
+        },
+        didDrawCell: (data) => {
+          if (data.section !== 'body') return;
+
+          const media = tableImages[data.row.index];
+
+          if (data.column.index === 7 && media?.photoImage) {
+            doc.addImage(
+              media.photoImage,
+              data.cell.x + 6,
+              data.cell.y + 5,
+              34,
+              34
+            );
+          }
+
+          if (data.column.index === 8 && media?.signatureImage) {
+            doc.addImage(
+              media.signatureImage,
+              data.cell.x + 4,
+              data.cell.y + 10,
+              48,
+              24
+            );
+          }
+        },
+        margin: { left: 40, right: 40 },
+      });
+
+      const fileName = getClassArchivePdfFileName(session);
+
+      try {
+        await uploadPdfToSharePoint(doc, fileName);
+        alert('Class PDF archived to SharePoint.');
+      } catch (error) {
+        console.error(error);
+        alert('SharePoint upload failed. The PDF will download instead.');
+        doc.save(fileName);
+      }
+    } catch (error) {
+      console.error('Class archive PDF generation error:', error);
+      setStatus(error.message || 'Failed to generate class archive.');
+    } finally {
+      setArchivingClassId(null);
+    }
+  }
+
   useEffect(() => {
     loadRecords();
   }, []);
@@ -511,7 +787,7 @@ export default function AdminRecords() {
                     <>
                       <button
                         type="button"
-                        className="secondary-button"
+                        className="secondary-button session-action-button"
                         onClick={() => downloadSessionCertificates(group)}
                         disabled={
                           group.records.length === 0 ||
@@ -525,7 +801,7 @@ export default function AdminRecords() {
 
                       <button
                         type="button"
-                        className="secondary-button"
+                        className="secondary-button session-action-button"
                         onClick={() => downloadSessionWalletCards(group)}
                         disabled={
                           group.records.length === 0 ||
@@ -535,6 +811,17 @@ export default function AdminRecords() {
                         {generatingWalletCardsId === group.id
                           ? 'Generating wallet cards...'
                           : 'Download Wallet Cards'}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="secondary-button session-action-button archive-class-button"
+                        onClick={() => downloadClassArchivePdf(group)}
+                        disabled={archivingClassId === group.id}
+                      >
+                        {archivingClassId === group.id
+                          ? 'Archiving...'
+                          : 'Archive Class PDF'}
                       </button>
                     </>
                   )}

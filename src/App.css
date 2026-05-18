@@ -267,7 +267,20 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
+}
+
+.session-action-button {
+  padding: 9px 12px;
+  border-radius: 7px;
+  font-size: 14px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.archive-class-button {
+  background: #dbeafe;
+  color: #1e3a8a;
 }
 
 .session-meta {

@@ -7,5 +7,6 @@
   included_files = [
     "server/templates/certificate_template.docx",
     "server/templates/cards/3.png",
-    "server/templates/cards/4.png"
+    "server/templates/cards/4.png",
+    "server/templates/cards/fonts/*.ttf"
   ]

@@ -85,6 +85,32 @@
   min-height: 130px;
 }
 
+.helper-text {
+  margin: 0;
+  color: #52616f;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.trainer-signature-box {
+  width: 100%;
+  height: 160px;
+  border: 2px dashed #94a3b8;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.trainer-signature-box canvas {
+  width: 100%;
+  height: 160px;
+  display: block;
+}
+
+.clear-signature-button {
+  justify-self: start;
+}
+
 .form-group input:focus,
 .form-group textarea:focus,
 .student-link-box input:focus {

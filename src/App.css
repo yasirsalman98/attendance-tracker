@@ -69,30 +69,6 @@ main {
   margin-top: 0;
 }
 
-.landing-message {
-  max-width: 720px;
-  margin: 64px auto;
-}
-
-.landing-message p,
-.invalid-attendance-link p,
-.expired-attendance-link p {
-  margin-bottom: 0;
-  color: #4b5563;
-  font-size: 18px;
-  line-height: 1.6;
-}
-
-.expired-attendance-link {
-  border-color: #fecaca;
-  background: #fef2f2;
-}
-
-.expired-attendance-link h2,
-.expired-attendance-link p {
-  color: #991b1b;
-}
-
 .muted {
   color: #6b7280;
 }
@@ -131,59 +107,6 @@ input {
   width: 100%;
   height: 220px;
   display: block;
-}
-
-.camera-preview-box {
-  width: 100%;
-  min-height: 260px;
-  border: 2px dashed #9ca3af;
-  border-radius: 8px;
-  overflow: hidden;
-  background: #111827;
-  display: grid;
-  place-items: center;
-  margin-top: 6px;
-  margin-bottom: 10px;
-}
-
-.camera-video,
-.captured-photo-preview {
-  width: 100%;
-  max-height: 360px;
-  object-fit: contain;
-  display: block;
-}
-
-.camera-video {
-  transform: scaleX(-1);
-}
-
-.camera-placeholder {
-  margin: 0;
-  padding: 24px;
-  color: #f9fafb;
-  font-weight: 700;
-  text-align: center;
-}
-
-.photo-canvas {
-  display: none;
-}
-
-.camera-button-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.photo-error {
-  margin: 10px 0 0;
-  padding: 12px;
-  border: 1px solid #fecaca;
-  border-radius: 8px;
-  background: #fef2f2;
-  color: #991b1b;
-  font-weight: 700;
 }
 
 .location-note {
@@ -227,77 +150,6 @@ button:disabled {
   gap: 12px;
 }
 
-.admin-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.session-records-list {
-  display: grid;
-  gap: 20px;
-  margin-top: 20px;
-}
-
-.session-record-card {
-  border: 1px solid #cfd8e3;
-  border-radius: 8px;
-  background: #ffffff;
-  overflow: hidden;
-  padding: 18px;
-}
-
-.session-record-top-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
-.session-record-top-row h3 {
-  margin: 0;
-  color: #111827;
-  font-size: 22px;
-  line-height: 1.25;
-}
-
-.session-card-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.session-meta {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 14px 20px;
-  margin: 0 0 18px;
-  padding: 16px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #f9fafb;
-}
-
-.session-meta div {
-  min-width: 0;
-}
-
-.session-meta dt {
-  color: #374151;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.session-meta dd {
-  margin: 4px 0 0;
-  color: #111827;
-  font-weight: 500;
-  overflow-wrap: anywhere;
-}
-
 .table-wrap {
   overflow-x: auto;
 }
@@ -328,99 +180,10 @@ th {
   background: white;
 }
 
-.student-media-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.student-photo-button {
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  cursor: pointer;
-}
-
-.student-photo-thumbnail {
-  width: 80px;
-  height: 80px;
-  display: block;
-  object-fit: cover;
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
-  background: #f9fafb;
-}
-
-.student-photo-button:hover .student-photo-thumbnail {
-  border-color: #036f5e;
-}
-
-.suspicious-warning {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  max-width: 280px;
-  margin-top: 8px;
-  padding: 8px 10px;
-  border: 1px solid #fbbf24;
-  border-radius: 8px;
-  background: #fffbeb;
-}
-
-.suspicious-icon {
-  flex: 0 0 auto;
-  color: #92400e;
-  font-size: 14px;
-  line-height: 1.2;
-}
-
-.suspicious-copy {
-  min-width: 0;
-}
-
-.suspicious-title {
-  color: #78350f;
-  font-size: 13px;
-  font-weight: 800;
-  line-height: 1.25;
-}
-
-.suspicious-reason {
-  color: #92400e;
-  font-size: 12px;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
 .optional-text {
   color: #6b7280;
   font-size: 14px;
   font-weight: 400;
-}
-
-.attendance-session-details {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 14px 18px;
-  margin: 0 0 20px;
-  padding: 16px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #f9fafb;
-}
-
-.attendance-session-details dt {
-  color: #374151;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.attendance-session-details dd {
-  margin: 4px 0 0;
-  color: #111827;
-  font-weight: 500;
-  overflow-wrap: anywhere;
 }
 
 .delete-button {
@@ -439,70 +202,22 @@ th {
   cursor: not-allowed;
 }
 
-@media (max-width: 760px) {
-  .admin-header,
-  .session-record-top-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .admin-actions {
-    justify-content: flex-start;
-  }
-
-  .session-card-actions {
-    justify-content: flex-start;
-  }
-
-  .session-meta {
-    grid-template-columns: 1fr;
-  }
+.session-banner {
+  margin-bottom: 24px;
+  padding: 18px;
+  border: 1px solid #d6e4df;
+  border-radius: 12px;
+  background: #f3faf7;
 }
 
-.photo-modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(17, 24, 39, 0.76);
+.session-banner h2 {
+  margin: 0 0 12px;
 }
 
-.photo-modal {
-  position: relative;
-  max-width: min(92vw, 900px);
-  max-height: 90vh;
-  padding: 16px;
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.35);
+.session-banner p {
+  margin: 6px 0;
 }
 
-.photo-modal-close {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 36px;
-  height: 36px;
-  padding: 0;
-  border-radius: 999px;
-  background: #111827;
-  color: #ffffff;
-  line-height: 1;
-}
-
-.photo-modal-image {
-  max-width: calc(92vw - 32px);
-  max-height: calc(90vh - 92px);
-  display: block;
-  object-fit: contain;
-  border-radius: 6px;
-}
-
-.photo-modal-actions {
-  display: flex;
-  justify-content: center;
-  gap: 10px;
-  margin-top: 14px;
+.status.error {
+  color: #b42318;
 }

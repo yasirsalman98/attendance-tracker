@@ -221,6 +221,51 @@
   gap: 10px;
 }
 
+.qr-code-box {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 22px;
+  align-items: center;
+  padding: 22px;
+  border: 1px solid #dde3ea;
+  border-radius: 14px;
+  background: #f8fafc;
+}
+
+.qr-code-image {
+  display: grid;
+  place-items: center;
+  width: 244px;
+  height: 244px;
+  padding: 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.qr-code-image canvas {
+  display: block;
+  width: 220px;
+  height: 220px;
+}
+
+.qr-code-copy {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+}
+
+.qr-code-copy h2 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.qr-code-copy p {
+  margin: 0;
+  color: #52616f;
+  line-height: 1.5;
+}
+
 .student-link-box p {
   margin: 0;
   color: #52616f;
@@ -254,8 +299,14 @@
 
   .form-row,
   .session-summary dl div,
-  .copy-row {
+  .copy-row,
+  .qr-code-box {
     grid-template-columns: 1fr;
+  }
+
+  .qr-code-image,
+  .qr-code-copy {
+    justify-self: center;
   }
 
   .action-row {
@@ -264,7 +315,8 @@
 
   .primary-button,
   .secondary-button,
-  .copy-row button {
+  .copy-row button,
+  .qr-code-copy {
     width: 100%;
   }
 }

@@ -1,6 +1,7 @@
 // src/pages/CreateTrainingSession.jsx
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { QRCodeCanvas } from 'qrcode.react';
 import SignaturePad from 'signature_pad';
 import { supabase } from '../supabaseClient';
 import './CreateTrainingSession.css';
@@ -69,6 +70,7 @@ function dataUrlToBlob(dataUrl) {
 export default function CreateTrainingSession() {
   const trainerSignatureCanvasRef = useRef(null);
   const trainerSignaturePadRef = useRef(null);
+  const qrCodeRef = useRef(null);
   const [courseName, setCourseName] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [trainingLocation, setTrainingLocation] = useState('');
@@ -266,6 +268,17 @@ export default function CreateTrainingSession() {
       console.error('Copy link error:', error);
       setErrorMessage('The session was created, but the link could not be copied.');
     }
+  }
+
+  function handleDownloadQrCode() {
+    const canvas = qrCodeRef.current?.querySelector('canvas');
+
+    if (!canvas || !createdSession?.id) return;
+
+    const link = document.createElement('a');
+    link.href = canvas.toDataURL('image/png');
+    link.download = `student-sign-in-${createdSession.id}.png`;
+    link.click();
   }
 
   function handleCreateAnother() {
@@ -508,6 +521,32 @@ export default function CreateTrainingSession() {
               </div>
 
               <p>Send this link to students or open it on the sign-in device.</p>
+            </div>
+
+            <div className="qr-code-box">
+              <div className="qr-code-image" ref={qrCodeRef}>
+                <QRCodeCanvas
+                  value={studentSignInLink}
+                  size={220}
+                  level="M"
+                  marginSize={4}
+                />
+              </div>
+
+              <div className="qr-code-copy">
+                <h2>Student QR Code</h2>
+                <p>
+                  Students can scan this QR code to open the same sign-in form.
+                </p>
+
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={handleDownloadQrCode}
+                >
+                  Download QR Code
+                </button>
+              </div>
             </div>
 
             <div className="action-row">

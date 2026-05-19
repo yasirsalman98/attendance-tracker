@@ -133,6 +133,42 @@ input {
   display: block;
 }
 
+.signature-box-accepted {
+  border-color: #036f5e;
+  box-shadow: 0 0 0 3px rgba(3, 111, 94, 0.12);
+}
+
+.signature-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.danger-secondary-button {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.danger-secondary-button:hover {
+  background: #fee2e2;
+}
+
+.signature-status,
+.signature-error {
+  margin: 10px 0 0;
+  font-weight: 700;
+}
+
+.signature-status {
+  color: #036f5e;
+}
+
+.signature-error {
+  color: #991b1b;
+}
+
 .camera-preview-box {
   width: 100%;
   min-height: 260px;

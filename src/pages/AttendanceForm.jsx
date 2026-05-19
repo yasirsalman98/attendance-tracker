@@ -91,15 +91,6 @@ function isAttendanceLinkExpired(expiresAt) {
   return Date.now() > expirationTime;
 }
 
-function formatDateTime(value) {
-  if (!value) return 'N/A';
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'N/A';
-
-  return date.toLocaleString();
-}
-
 function formatTime(value) {
   if (!value) return 'Not provided';
 
@@ -116,6 +107,7 @@ export default function AttendanceForm() {
   const { sessionId } = useParams();
   const canvasRef = useRef(null);
   const signaturePadRef = useRef(null);
+  const acceptedSignatureDataRef = useRef(null);
   const videoRef = useRef(null);
   const photoCanvasRef = useRef(null);
   const mediaStreamRef = useRef(null);
@@ -129,6 +121,9 @@ export default function AttendanceForm() {
   const [status, setStatus] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [hasSignature, setHasSignature] = useState(false);
+  const [isSignatureAccepted, setIsSignatureAccepted] = useState(false);
+  const [acceptedSignatureDataUrl, setAcceptedSignatureDataUrl] = useState('');
+  const [signatureMessage, setSignatureMessage] = useState('');
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [cameraError, setCameraError] = useState('');
   const [photoDataUrl, setPhotoDataUrl] = useState('');
@@ -137,7 +132,8 @@ export default function AttendanceForm() {
   const canSubmit =
     studentName.trim() &&
     studentEmail.trim() &&
-    hasSignature &&
+    isSignatureAccepted &&
+    acceptedSignatureDataUrl &&
     photoBlob &&
     sessionId &&
     sessionDetails &&
@@ -176,7 +172,9 @@ export default function AttendanceForm() {
       const signaturePad = signaturePadRef.current;
       let savedSignature = null;
 
-      if (
+      if (acceptedSignatureDataRef.current?.length) {
+        savedSignature = acceptedSignatureDataRef.current;
+      } else if (
         preserveSignature &&
         signaturePad &&
         typeof signaturePad.toData === 'function' &&
@@ -210,7 +208,13 @@ export default function AttendanceForm() {
       backgroundColor: 'rgb(255, 255, 255)',
       penColor: 'rgb(0, 0, 0)',
     });
-    const handleSignatureEnd = () => setHasSignature(!signaturePad.isEmpty());
+    const handleSignatureEnd = () => {
+      setHasSignature(!signaturePad.isEmpty());
+      setIsSignatureAccepted(false);
+      setAcceptedSignatureDataUrl('');
+      acceptedSignatureDataRef.current = null;
+      setSignatureMessage('');
+    };
 
     signaturePadRef.current = signaturePad;
     signaturePad.addEventListener('endStroke', handleSignatureEnd);
@@ -288,7 +292,29 @@ export default function AttendanceForm() {
 
   function clearSignature() {
     signaturePadRef.current?.clear();
+    signaturePadRef.current?.on();
+    acceptedSignatureDataRef.current = null;
     setHasSignature(false);
+    setIsSignatureAccepted(false);
+    setAcceptedSignatureDataUrl('');
+    setSignatureMessage('');
+  }
+
+  function acceptSignature() {
+    const signaturePad = signaturePadRef.current;
+
+    if (!signaturePad || signaturePad.isEmpty()) {
+      setSignatureMessage('Please sign before accepting.');
+      setIsSignatureAccepted(false);
+      return;
+    }
+
+    acceptedSignatureDataRef.current = signaturePad.toData();
+    setAcceptedSignatureDataUrl(signaturePad.toDataURL('image/png'));
+    setHasSignature(true);
+    setIsSignatureAccepted(true);
+    setSignatureMessage('Signature accepted.');
+    signaturePad.off();
   }
 
   function stopCamera(updateState = true) {
@@ -396,8 +422,8 @@ export default function AttendanceForm() {
       return;
     }
 
-    if (!signaturePadRef.current || signaturePadRef.current.isEmpty()) {
-      setStatus('Please sign before submitting.');
+    if (!isSignatureAccepted || !acceptedSignatureDataUrl) {
+      setStatus('Please accept your signature before submitting.');
       return;
     }
 
@@ -434,8 +460,7 @@ export default function AttendanceForm() {
 
       setStatus('Uploading signature...');
 
-      const signatureDataUrl = signaturePadRef.current.toDataURL('image/png');
-      const signatureBlob = dataUrlToBlob(signatureDataUrl);
+      const signatureBlob = dataUrlToBlob(acceptedSignatureDataUrl);
 
       const fileName = `${Date.now()}-${crypto.randomUUID()}.png`;
       const signaturePath = `attendance/${fileName}`;
@@ -612,13 +637,30 @@ export default function AttendanceForm() {
 
         <div>
           <label>Signature</label>
-          <div className="signature-box">
+          <div className={`signature-box${isSignatureAccepted ? ' signature-box-accepted' : ''}`}>
             <canvas ref={canvasRef} />
           </div>
 
-          <button type="button" className="secondary-button" onClick={clearSignature}>
-            Clear Signature
-          </button>
+          <div className="signature-action-row">
+            <button type="button" onClick={acceptSignature}>
+              Accept Signature
+            </button>
+
+            <button
+              type="button"
+              className="secondary-button danger-secondary-button"
+              onClick={clearSignature}
+              disabled={!hasSignature && !isSignatureAccepted}
+            >
+              Remove Signature
+            </button>
+          </div>
+
+          {signatureMessage && (
+            <p className={isSignatureAccepted ? 'signature-status' : 'signature-error'}>
+              {signatureMessage}
+            </p>
+          )}
         </div>
 
         <div>

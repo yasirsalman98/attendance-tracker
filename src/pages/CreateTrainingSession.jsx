@@ -70,6 +70,7 @@ function dataUrlToBlob(dataUrl) {
 export default function CreateTrainingSession() {
   const trainerSignatureCanvasRef = useRef(null);
   const trainerSignaturePadRef = useRef(null);
+  const acceptedTrainerSignatureDataRef = useRef(null);
   const qrCodeRef = useRef(null);
   const [courseName, setCourseName] = useState('');
   const [companyName, setCompanyName] = useState('');
@@ -85,6 +86,10 @@ export default function CreateTrainingSession() {
   const [createdSession, setCreatedSession] = useState(null);
   const [copied, setCopied] = useState(false);
   const [hasTrainerSignature, setHasTrainerSignature] = useState(false);
+  const [isTrainerSignatureAccepted, setIsTrainerSignatureAccepted] = useState(false);
+  const [acceptedTrainerSignatureDataUrl, setAcceptedTrainerSignatureDataUrl] =
+    useState('');
+  const [trainerSignatureMessage, setTrainerSignatureMessage] = useState('');
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
@@ -102,14 +107,55 @@ export default function CreateTrainingSession() {
 
     if (!canvas) return undefined;
 
-    function resizeCanvas() {
+    function getCanvasSize() {
       const ratio = Math.max(window.devicePixelRatio || 1, 1);
-      const parentWidth = canvas.parentElement.offsetWidth;
+      const parentWidth = canvas.parentElement?.offsetWidth || canvas.offsetWidth;
 
-      canvas.width = parentWidth * ratio;
-      canvas.height = 160 * ratio;
-      canvas.getContext('2d').scale(ratio, ratio);
-      setHasTrainerSignature(false);
+      return {
+        height: Math.max(Math.floor(160 * ratio), 1),
+        ratio,
+        width: Math.max(Math.floor(parentWidth * ratio), 1),
+      };
+    }
+
+    function resizeCanvas({ preserveSignature = false } = {}) {
+      const { height, ratio, width } = getCanvasSize();
+
+      if (canvas.width === width && canvas.height === height) {
+        return;
+      }
+
+      const signaturePad = trainerSignaturePadRef.current;
+      let savedSignature = null;
+
+      if (acceptedTrainerSignatureDataRef.current?.length) {
+        savedSignature = acceptedTrainerSignatureDataRef.current;
+      } else if (
+        preserveSignature &&
+        signaturePad &&
+        typeof signaturePad.toData === 'function' &&
+        !signaturePad.isEmpty()
+      ) {
+        savedSignature = signaturePad.toData();
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext('2d')?.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+      if (
+        signaturePad &&
+        savedSignature?.length &&
+        typeof signaturePad.fromData === 'function'
+      ) {
+        try {
+          signaturePad.fromData(savedSignature);
+          setHasTrainerSignature(!signaturePad.isEmpty());
+        } catch (error) {
+          console.error('Trainer signature resize restore error:', error);
+          setHasTrainerSignature(false);
+        }
+      }
     }
 
     resizeCanvas();
@@ -118,15 +164,22 @@ export default function CreateTrainingSession() {
       backgroundColor: 'rgb(255, 255, 255)',
       penColor: 'rgb(0, 0, 0)',
     });
-    const handleSignatureEnd = () =>
+    const handleSignatureEnd = () => {
       setHasTrainerSignature(!signaturePad.isEmpty());
+      setIsTrainerSignatureAccepted(false);
+      setAcceptedTrainerSignatureDataUrl('');
+      acceptedTrainerSignatureDataRef.current = null;
+      setTrainerSignatureMessage('');
+    };
 
     trainerSignaturePadRef.current = signaturePad;
     signaturePad.addEventListener('endStroke', handleSignatureEnd);
-    window.addEventListener('resize', resizeCanvas);
+    const handleResize = () => resizeCanvas({ preserveSignature: true });
+
+    window.addEventListener('resize', handleResize);
 
     return () => {
-      window.removeEventListener('resize', resizeCanvas);
+      window.removeEventListener('resize', handleResize);
       signaturePad.removeEventListener('endStroke', handleSignatureEnd);
       signaturePad.off();
       trainerSignaturePadRef.current = null;
@@ -135,7 +188,29 @@ export default function CreateTrainingSession() {
 
   function clearTrainerSignature() {
     trainerSignaturePadRef.current?.clear();
+    trainerSignaturePadRef.current?.on();
+    acceptedTrainerSignatureDataRef.current = null;
     setHasTrainerSignature(false);
+    setIsTrainerSignatureAccepted(false);
+    setAcceptedTrainerSignatureDataUrl('');
+    setTrainerSignatureMessage('');
+  }
+
+  function acceptTrainerSignature() {
+    const signaturePad = trainerSignaturePadRef.current;
+
+    if (!signaturePad || signaturePad.isEmpty()) {
+      setTrainerSignatureMessage('Please sign before accepting.');
+      setIsTrainerSignatureAccepted(false);
+      return;
+    }
+
+    acceptedTrainerSignatureDataRef.current = signaturePad.toData();
+    setAcceptedTrainerSignatureDataUrl(signaturePad.toDataURL('image/png'));
+    setHasTrainerSignature(true);
+    setIsTrainerSignatureAccepted(true);
+    setTrainerSignatureMessage('Signature accepted.');
+    signaturePad.off();
   }
 
   async function handleSubmit(event) {
@@ -161,8 +236,8 @@ export default function CreateTrainingSession() {
       return;
     }
 
-    if (!trainerSignaturePadRef.current || trainerSignaturePadRef.current.isEmpty()) {
-      setErrorMessage('Trainer signature is required.');
+    if (!acceptedTrainerSignatureDataUrl) {
+      setErrorMessage('Please accept the trainer signature before creating the session.');
       return;
     }
 
@@ -210,9 +285,7 @@ export default function CreateTrainingSession() {
     try {
       let trainerSignaturePath = null;
 
-      const trainerSignatureDataUrl =
-        trainerSignaturePadRef.current.toDataURL('image/png');
-      const trainerSignatureBlob = dataUrlToBlob(trainerSignatureDataUrl);
+      const trainerSignatureBlob = dataUrlToBlob(acceptedTrainerSignatureDataUrl);
       const fileName = `${Date.now()}-${crypto.randomUUID()}.png`;
 
       trainerSignaturePath = `trainer-signatures/${fileName}`;
@@ -414,18 +487,40 @@ export default function CreateTrainingSession() {
                 Required. This signature appears on generated certificates and wallet cards.
               </p>
 
-              <div className="trainer-signature-box">
+              <div
+                className={`trainer-signature-box${
+                  isTrainerSignatureAccepted ? ' signature-box-accepted' : ''
+                }`}
+              >
                 <canvas ref={trainerSignatureCanvasRef} />
               </div>
 
-              <button
-                type="button"
-                className="secondary-button clear-signature-button"
-                onClick={clearTrainerSignature}
-                disabled={!hasTrainerSignature}
-              >
-                Clear Trainer Signature
-              </button>
+              <div className="signature-action-row">
+                <button type="button" onClick={acceptTrainerSignature}>
+                  Accept Signature
+                </button>
+
+                <button
+                  type="button"
+                  className="secondary-button danger-secondary-button"
+                  onClick={clearTrainerSignature}
+                  disabled={!hasTrainerSignature && !isTrainerSignatureAccepted}
+                >
+                  Remove Signature
+                </button>
+              </div>
+
+              {trainerSignatureMessage && (
+                <p
+                  className={
+                    isTrainerSignatureAccepted
+                      ? 'signature-status'
+                      : 'signature-error'
+                  }
+                >
+                  {trainerSignatureMessage}
+                </p>
+              )}
             </div>
 
             <div className="form-group">

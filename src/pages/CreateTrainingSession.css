@@ -107,8 +107,44 @@
   display: block;
 }
 
-.clear-signature-button {
-  justify-self: start;
+.trainer-signature-box.signature-box-accepted {
+  border-color: #036f5e;
+  box-shadow: 0 0 0 3px rgba(3, 111, 94, 0.12);
+}
+
+.signature-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.signature-action-row button {
+  background: #036f5e;
+  color: #ffffff;
+}
+
+.signature-action-row .danger-secondary-button {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.signature-action-row .danger-secondary-button:hover {
+  background: #fee2e2;
+}
+
+.signature-status,
+.signature-error {
+  margin: 0;
+  font-weight: 700;
+}
+
+.signature-status {
+  color: #036f5e;
+}
+
+.signature-error {
+  color: #991b1b;
 }
 
 .form-group input:focus,
@@ -315,6 +351,7 @@
 
   .primary-button,
   .secondary-button,
+  .signature-action-row button,
   .copy-row button,
   .qr-code-copy {
     width: 100%;

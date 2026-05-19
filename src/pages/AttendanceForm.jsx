@@ -155,29 +155,52 @@ export default function AttendanceForm() {
       return undefined;
     }
 
-    function resizeCanvas() {
+    function getCanvasSize() {
       const ratio = Math.max(window.devicePixelRatio || 1, 1);
-      const parentWidth = canvas.parentElement.offsetWidth;
-      const nextWidth = parentWidth * ratio;
-      const nextHeight = 220 * ratio;
-      const signaturePad = signaturePadRef.current;
-      const savedSignature = signaturePad?.isEmpty()
-        ? null
-        : signaturePad.toData();
+      const parentWidth = canvas.parentElement?.offsetWidth || canvas.offsetWidth;
 
-      if (canvas.width === nextWidth && canvas.height === nextHeight) {
+      return {
+        height: Math.max(Math.floor(220 * ratio), 1),
+        ratio,
+        width: Math.max(Math.floor(parentWidth * ratio), 1),
+      };
+    }
+
+    function resizeCanvas({ preserveSignature = false } = {}) {
+      const { height, ratio, width } = getCanvasSize();
+
+      if (canvas.width === width && canvas.height === height) {
         return;
       }
 
-      canvas.width = nextWidth;
-      canvas.height = nextHeight;
-      canvas.getContext('2d').scale(ratio, ratio);
+      const signaturePad = signaturePadRef.current;
+      let savedSignature = null;
 
-      if (savedSignature?.length) {
-        signaturePad.fromData(savedSignature);
-        setHasSignature(true);
-      } else {
-        setHasSignature(false);
+      if (
+        preserveSignature &&
+        signaturePad &&
+        typeof signaturePad.toData === 'function' &&
+        !signaturePad.isEmpty()
+      ) {
+        savedSignature = signaturePad.toData();
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext('2d')?.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+      if (
+        signaturePad &&
+        savedSignature?.length &&
+        typeof signaturePad.fromData === 'function'
+      ) {
+        try {
+          signaturePad.fromData(savedSignature);
+          setHasSignature(!signaturePad.isEmpty());
+        } catch (error) {
+          console.error('Signature resize restore error:', error);
+          setHasSignature(false);
+        }
       }
     }
 
@@ -192,12 +215,15 @@ export default function AttendanceForm() {
     signaturePadRef.current = signaturePad;
     signaturePad.addEventListener('endStroke', handleSignatureEnd);
 
-    window.addEventListener('resize', resizeCanvas);
+    const handleResize = () => resizeCanvas({ preserveSignature: true });
+
+    window.addEventListener('resize', handleResize);
 
     return () => {
-      window.removeEventListener('resize', resizeCanvas);
+      window.removeEventListener('resize', handleResize);
       signaturePad.removeEventListener('endStroke', handleSignatureEnd);
       signaturePad.off();
+      signaturePadRef.current = null;
     };
   }, [sessionId, sessionDetails, isSessionExpired]);
 

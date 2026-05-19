@@ -158,11 +158,27 @@ export default function AttendanceForm() {
     function resizeCanvas() {
       const ratio = Math.max(window.devicePixelRatio || 1, 1);
       const parentWidth = canvas.parentElement.offsetWidth;
+      const nextWidth = parentWidth * ratio;
+      const nextHeight = 220 * ratio;
+      const signaturePad = signaturePadRef.current;
+      const savedSignature = signaturePad?.isEmpty()
+        ? null
+        : signaturePad.toData();
 
-      canvas.width = parentWidth * ratio;
-      canvas.height = 220 * ratio;
+      if (canvas.width === nextWidth && canvas.height === nextHeight) {
+        return;
+      }
+
+      canvas.width = nextWidth;
+      canvas.height = nextHeight;
       canvas.getContext('2d').scale(ratio, ratio);
-      setHasSignature(false);
+
+      if (savedSignature?.length) {
+        signaturePad.fromData(savedSignature);
+        setHasSignature(true);
+      } else {
+        setHasSignature(false);
+      }
     }
 
     resizeCanvas();

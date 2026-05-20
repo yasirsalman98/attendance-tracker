@@ -16,6 +16,7 @@
     "concurrently": "^9.2.1",
     "docxtemplater": "^3.68.7",
     "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",

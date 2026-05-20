@@ -58,7 +58,7 @@ function getOrCreateDeviceId() {
 function getCurrentLocation() {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
-      reject(new Error('Geolocation is not supported by this browser.'));
+      reject(new Error('Geolocation is not supported by this browser. / Este navegador no permite compartir la ubicacion.'));
       return;
     }
 
@@ -71,7 +71,7 @@ function getCurrentLocation() {
         });
       },
       () => {
-        reject(new Error('Location permission is required to submit attendance. Please allow location access and try again.'));
+        reject(new Error('Location permission is required to submit attendance. Please allow location access and try again. / Se requiere permiso de ubicacion para enviar la asistencia. Permita el acceso a la ubicacion e intentelo de nuevo.'));
       },
       {
         enableHighAccuracy: true,
@@ -92,10 +92,10 @@ function isAttendanceLinkExpired(expiresAt) {
 }
 
 function formatTime(value) {
-  if (!value) return 'Not provided';
+  if (!value) return 'Not provided / No proporcionado';
 
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'Not provided';
+  if (Number.isNaN(date.getTime())) return 'Not provided / No proporcionado';
 
   return date.toLocaleTimeString([], {
     hour: 'numeric',
@@ -235,7 +235,7 @@ export default function AttendanceForm() {
     if (isCameraOpen && videoRef.current && mediaStreamRef.current) {
       videoRef.current.srcObject = mediaStreamRef.current;
       videoRef.current.play().catch(() => {
-        setCameraError('Camera permission is required to submit attendance.');
+        setCameraError('Camera permission is required to submit attendance. / Se requiere permiso de camara para enviar la asistencia.');
       });
     }
   }, [isCameraOpen]);
@@ -253,7 +253,7 @@ export default function AttendanceForm() {
       if (!sessionId) {
         setSessionDetails(null);
         setIsLoadingSession(false);
-        setSessionError('Invalid attendance link. Please use the link provided by your instructor.');
+        setSessionError('Invalid attendance link. Please use the link provided by your instructor. / Enlace de asistencia no valido. Use el enlace proporcionado por su instructor.');
         return;
       }
 
@@ -271,10 +271,10 @@ export default function AttendanceForm() {
       if (error) {
         console.error('Load training session error:', error);
         setSessionDetails(null);
-        setSessionError('Invalid attendance link. Please use the link provided by your instructor.');
+        setSessionError('Invalid attendance link. Please use the link provided by your instructor. / Enlace de asistencia no valido. Use el enlace proporcionado por su instructor.');
       } else if (!data) {
         setSessionDetails(null);
-        setSessionError('Invalid attendance link. Please use the link provided by your instructor.');
+        setSessionError('Invalid attendance link. Please use the link provided by your instructor. / Enlace de asistencia no valido. Use el enlace proporcionado por su instructor.');
       } else {
         setSessionDetails(data);
         setSessionError('');
@@ -304,7 +304,7 @@ export default function AttendanceForm() {
     const signaturePad = signaturePadRef.current;
 
     if (!signaturePad || signaturePad.isEmpty()) {
-      setSignatureMessage('Please sign before accepting.');
+      setSignatureMessage('Please sign before accepting. / Firme antes de aceptar.');
       setIsSignatureAccepted(false);
       return;
     }
@@ -313,7 +313,7 @@ export default function AttendanceForm() {
     setAcceptedSignatureDataUrl(signaturePad.toDataURL('image/png'));
     setHasSignature(true);
     setIsSignatureAccepted(true);
-    setSignatureMessage('Signature accepted.');
+    setSignatureMessage('Signature accepted. / Firma aceptada.');
     signaturePad.off();
   }
 
@@ -332,12 +332,12 @@ export default function AttendanceForm() {
 
   async function openCamera() {
     if (isSessionExpired) {
-      setCameraError('This attendance link has expired. Please contact your instructor.');
+      setCameraError('This attendance link has expired. Please contact your instructor. / Este enlace de asistencia ha vencido. Comuniquese con su instructor.');
       return;
     }
 
     if (!navigator.mediaDevices?.getUserMedia) {
-      setCameraError('Camera permission is required to submit attendance.');
+      setCameraError('Camera permission is required to submit attendance. / Se requiere permiso de camara para enviar la asistencia.');
       return;
     }
 
@@ -357,13 +357,13 @@ export default function AttendanceForm() {
       setIsCameraOpen(true);
     } catch (error) {
       console.error('Camera permission error:', error);
-      setCameraError('Camera permission is required to submit attendance.');
+      setCameraError('Camera permission is required to submit attendance. / Se requiere permiso de camara para enviar la asistencia.');
     }
   }
 
   async function capturePhoto() {
     if (isSessionExpired) {
-      setCameraError('This attendance link has expired. Please contact your instructor.');
+      setCameraError('This attendance link has expired. Please contact your instructor. / Este enlace de asistencia ha vencido. Comuniquese con su instructor.');
       return;
     }
 
@@ -371,7 +371,7 @@ export default function AttendanceForm() {
     const canvas = photoCanvasRef.current;
 
     if (!video || !canvas) {
-      setCameraError('Camera permission is required to submit attendance.');
+      setCameraError('Camera permission is required to submit attendance. / Se requiere permiso de camara para enviar la asistencia.');
       return;
     }
 
@@ -400,12 +400,12 @@ export default function AttendanceForm() {
     event.preventDefault();
 
     if (!sessionId || !sessionDetails) {
-      setStatus('Invalid attendance link. Please use the link provided by your instructor.');
+      setStatus('Invalid attendance link. Please use the link provided by your instructor. / Enlace de asistencia no valido. Use el enlace proporcionado por su instructor.');
       return;
     }
 
     if (isAttendanceLinkExpired(sessionDetails.expires_at)) {
-      setStatus('This attendance link has expired. Please contact your instructor.');
+      setStatus('This attendance link has expired. Please contact your instructor. / Este enlace de asistencia ha vencido. Comuniquese con su instructor.');
       return;
     }
 
@@ -413,22 +413,22 @@ export default function AttendanceForm() {
     const cleanEmail = studentEmail.trim().toLowerCase();
 
     if (!cleanName) {
-      setStatus('Please enter your name.');
+      setStatus('Please enter your name. / Ingrese su nombre.');
       return;
     }
 
     if (!cleanEmail) {
-      setStatus('Please enter your email.');
+      setStatus('Please enter your email. / Ingrese su correo electronico.');
       return;
     }
 
     if (!isSignatureAccepted || !acceptedSignatureDataUrl) {
-      setStatus('Please accept your signature before submitting.');
+      setStatus('Please accept your signature before submitting. / Acepte su firma antes de enviar.');
       return;
     }
 
     if (!photoBlob) {
-      setStatus('Please take a photo before submitting.');
+      setStatus('Please take a photo before submitting. / Tome una foto antes de enviar.');
       return;
     }
 
@@ -450,15 +450,15 @@ export default function AttendanceForm() {
           ...currentSessionDetails,
           expires_at: sessionCheck.data?.expires_at || currentSessionDetails?.expires_at,
         }));
-        setStatus('This attendance link has expired. Please contact your instructor.');
+        setStatus('This attendance link has expired. Please contact your instructor. / Este enlace de asistencia ha vencido. Comuniquese con su instructor.');
         return;
       }
 
-      setStatus('Requesting location permission...');
+      setStatus('Requesting location permission... / Solicitando permiso de ubicacion...');
 
       const location = await getCurrentLocation();
 
-      setStatus('Uploading signature...');
+      setStatus('Uploading signature... / Subiendo firma...');
 
       const signatureBlob = dataUrlToBlob(acceptedSignatureDataUrl);
 
@@ -476,7 +476,7 @@ export default function AttendanceForm() {
         throw uploadResult.error;
       }
 
-      setStatus('Uploading photo...');
+      setStatus('Uploading photo... / Subiendo foto...');
 
       const photoPath = `${sessionId}/${getSafeEmailPathPart(cleanEmail)}_${Date.now()}.jpg`;
       const photoUploadResult = await supabase.storage
@@ -490,7 +490,7 @@ export default function AttendanceForm() {
         throw photoUploadResult.error;
       }
 
-      setStatus('Saving attendance record...');
+      setStatus('Saving attendance record... / Guardando registro de asistencia...');
 
       const insertResult = await supabase.from('attendance_records').insert({
         training_session_id: sessionId,
@@ -519,10 +519,10 @@ export default function AttendanceForm() {
       setPhotoBlob(null);
       stopCamera();
 
-      setStatus('Attendance submitted successfully. 🎉 ✅');
+      setStatus('Attendance submitted successfully. / Asistencia enviada correctamente.');
     } catch (error) {
       console.error(error);
-      setStatus(error.message || 'Something went wrong. Please try again.');
+      setStatus(error.message || 'Something went wrong. Please try again. / Algo salio mal. Intentelo de nuevo.');
     } finally {
       setIsSubmitting(false);
     }
@@ -531,9 +531,9 @@ export default function AttendanceForm() {
   if (!sessionId || sessionError) {
     return (
       <section className="card invalid-attendance-link">
-        <h2>Invalid Attendance Link</h2>
+        <h2>Invalid Attendance Link / Enlace de asistencia no valido</h2>
         <p>
-          Invalid attendance link. Please use the link provided by your instructor.
+          Invalid attendance link. Please use the link provided by your instructor. / Enlace de asistencia no valido. Use el enlace proporcionado por su instructor.
         </p>
       </section>
     );
@@ -542,8 +542,8 @@ export default function AttendanceForm() {
   if (isLoadingSession) {
     return (
       <section className="card">
-        <h2>Student Attendance Form</h2>
-        <p className="status">Loading training session...</p>
+        <h2>Student Attendance Form / Formulario de asistencia del estudiante</h2>
+        <p className="status">Loading training session... / Cargando sesion de capacitacion...</p>
       </section>
     );
   }
@@ -551,99 +551,99 @@ export default function AttendanceForm() {
   if (isSessionExpired) {
     return (
       <section className="card expired-attendance-link" role="alert">
-        <h2>Attendance Link Expired</h2>
-        <p>This attendance link has expired. Please contact your instructor.</p>
+        <h2>Attendance Link Expired / El enlace de asistencia ha vencido</h2>
+        <p>This attendance link has expired. Please contact your instructor. / Este enlace de asistencia ha vencido. Comuniquese con su instructor.</p>
       </section>
     );
   }
 
   return (
     <section className="card">
-      <h2>Student Attendance Form</h2>
+      <h2>Student Attendance Form / Formulario de asistencia del estudiante</h2>
 
       <dl className="attendance-session-details">
         <div>
-          <dt>Course</dt>
+          <dt>Course / Curso</dt>
           <dd>{sessionDetails.course_name}</dd>
         </div>
 
         <div>
-          <dt>Training Date</dt>
+          <dt>Training Date / Fecha de capacitacion</dt>
           <dd>{sessionDetails.training_date}</dd>
         </div>
 
         <div>
-          <dt>Trainer</dt>
+          <dt>Trainer / Instructor</dt>
           <dd>{sessionDetails.trainer_name}</dd>
         </div>
 
         <div>
-          <dt>Company</dt>
-          <dd>{sessionDetails.company_name || 'Not provided'}</dd>
+          <dt>Company / Compania</dt>
+          <dd>{sessionDetails.company_name || 'Not provided / No proporcionado'}</dd>
         </div>
 
         <div>
-          <dt>Location</dt>
-          <dd>{sessionDetails.training_location || 'Not provided'}</dd>
+          <dt>Location / Ubicacion</dt>
+          <dd>{sessionDetails.training_location || 'Not provided / No proporcionado'}</dd>
         </div>
 
         <div>
-          <dt>Start Time</dt>
+          <dt>Start Time / Hora de inicio</dt>
           <dd>{formatTime(sessionDetails.time_started)}</dd>
         </div>
 
         <div>
-          <dt>Class End Time</dt>
+          <dt>Class End Time / Hora de finalizacion</dt>
           <dd>{formatTime(sessionDetails.time_stopped)}</dd>
         </div>
       </dl>
 
       <p className="muted">
-        Enter your name, email, sign, and submit. Your browser will ask for location permission.
+        Enter your name, email, sign, and submit. Your browser will ask for location permission. / Ingrese su nombre y correo electronico, firme y envie. Su navegador le pedira permiso de ubicacion.
       </p>
 
       <form onSubmit={handleSubmit} className="form">
         <label>
-          Student Name
+          Student Name / Nombre del estudiante
           <input
             type="text"
             value={studentName}
             onChange={(event) => setStudentName(event.target.value)}
-            placeholder="Enter your full name"
+            placeholder="Enter your full name / Ingrese su nombre completo"
           />
         </label>
 
         <label>
-          Student Email
+          Student Email / Correo electronico del estudiante
           <input
             type="email"
             value={studentEmail}
             onChange={(event) => setStudentEmail(event.target.value)}
-            placeholder="Enter your email"
+            placeholder="Enter your email / Ingrese su correo electronico"
           />
         </label>
 
         <label>
         <span>
-          Company <span className="optional-text">(optional)</span>
+          Company / Compania <span className="optional-text">(optional / opcional)</span>
         </span>
         <input
           type="text"
           value={company}
           onChange={(event) => setCompany(event.target.value)}
-          placeholder="Enter your company name"
+          placeholder="Enter your company name / Ingrese el nombre de su compania"
         />
       </label>
 
         <div>
-          <label>Signature</label>
+          <label>Signature / Firma</label>
           <div className={`signature-box${isSignatureAccepted ? ' signature-box-accepted' : ''}`}>
             <canvas ref={canvasRef} />
           </div>
 
           <div className="signature-action-row">
             <button type="button" onClick={acceptSignature}>
-              Accept Signature
+              Accept Signature / Aceptar firma
             </button>
 
             <button
@@ -652,7 +652,7 @@ export default function AttendanceForm() {
               onClick={clearSignature}
               disabled={!hasSignature && !isSignatureAccepted}
             >
-              Remove Signature
+              Remove Signature / Eliminar firma
             </button>
           </div>
 
@@ -664,7 +664,7 @@ export default function AttendanceForm() {
         </div>
 
         <div>
-          <label>Live Photo</label>
+          <label>Live Photo / Foto en vivo</label>
 
           <div className="camera-preview-box">
             {isCameraOpen && (
@@ -680,13 +680,13 @@ export default function AttendanceForm() {
             {!isCameraOpen && photoDataUrl && (
               <img
                 src={photoDataUrl}
-                alt="Captured attendance"
+                alt="Captured attendance / Foto de asistencia capturada"
                 className="captured-photo-preview"
               />
             )}
 
             {!isCameraOpen && !photoDataUrl && (
-              <p className="camera-placeholder">Photo capture is required.</p>
+              <p className="camera-placeholder">Photo capture is required. / Se requiere tomar una foto.</p>
             )}
           </div>
 
@@ -695,25 +695,25 @@ export default function AttendanceForm() {
           <div className="camera-button-row">
             {!isCameraOpen && !photoDataUrl && (
               <button type="button" className="secondary-button" onClick={openCamera}>
-                Open Camera
+                Open Camera / Abrir camara
               </button>
             )}
 
             {isCameraOpen && (
               <>
                 <button type="button" onClick={capturePhoto}>
-                  Take Photo
+                  Take Photo / Tomar foto
                 </button>
 
                 <button type="button" className="secondary-button" onClick={stopCamera}>
-                  Cancel
+                  Cancel / Cancelar
                 </button>
               </>
             )}
 
             {!isCameraOpen && photoDataUrl && (
               <button type="button" className="secondary-button" onClick={retakePhoto}>
-                Retake Photo
+                Retake Photo / Tomar otra foto
               </button>
             )}
           </div>
@@ -722,11 +722,11 @@ export default function AttendanceForm() {
         </div>
 
         <p className="location-note">
-          Location permission is required to submit attendance. Please choose Allow when your browser asks.
+          Location permission is required to submit attendance. Please choose Allow when your browser asks. / Se requiere permiso de ubicacion para enviar la asistencia. Elija Permitir cuando su navegador lo solicite.
         </p>
 
         <button type="submit" disabled={!canSubmit}>
-          {isSubmitting ? 'Submitting...' : 'Submit Attendance'}
+          {isSubmitting ? 'Submitting... / Enviando...' : 'Submit Attendance / Enviar asistencia'}
         </button>
 
         {status && <p className="status">{status}</p>}

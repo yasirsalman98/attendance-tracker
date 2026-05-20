@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import ExcelJS from 'exceljs';
 import { supabase } from '../supabaseClient';
 
 function formatDateTime(value) {
@@ -58,6 +59,36 @@ function getClassArchivePdfFileName(session) {
   const trainingDate = session?.training_date || new Date().toISOString().split('T')[0];
 
   return `${courseName}-class-archive-${trainingDate}.pdf`;
+}
+
+function getClassArchiveExcelFileName(session) {
+  const courseName = cleanFileName(session?.course_name, 'training-session');
+  const trainingDate = session?.training_date || new Date().toISOString().split('T')[0];
+
+  return `${courseName}-class-archive-${trainingDate}.xlsx`;
+}
+
+function getClassInfoRows(session, recordCount, generatedAt) {
+  return [
+    ['Course Name', session.course_name || 'N/A'],
+    ['Training Date', session.training_date || 'N/A'],
+    ['Time Started', formatDateTime(session.time_started)],
+    ['Class End Time', formatDateTime(session.time_stopped)],
+    ['Attendance Link Expires At', formatDateTime(session.expires_at)],
+    ['Trainer Name', session.trainer_name || 'N/A'],
+    ['Company Name', session.company_name || 'N/A'],
+    ['Training Location', session.training_location || 'N/A'],
+    ['Course Outline', session.course_outline || 'N/A'],
+    ['Total Students Attended', String(recordCount)],
+    ['Generated At', generatedAt],
+  ];
+}
+
+function getImageExtension(dataUrl) {
+  if (String(dataUrl).startsWith('data:image/jpeg')) return 'jpeg';
+  if (String(dataUrl).startsWith('data:image/jpg')) return 'jpeg';
+
+  return 'png';
 }
 
 function isLocalHost() {
@@ -290,6 +321,7 @@ export default function AdminRecords() {
   const [generatingCertificatesId, setGeneratingCertificatesId] = useState(null);
   const [generatingWalletCardsId, setGeneratingWalletCardsId] = useState(null);
   const [archivingClassId, setArchivingClassId] = useState(null);
+  const [archivingClassExcelId, setArchivingClassExcelId] = useState(null);
   const [selectedPhotoUrl, setSelectedPhotoUrl] = useState('');
   const [selectedPhotoAlt, setSelectedPhotoAlt] = useState('');
   const [selectedPhotoFileName, setSelectedPhotoFileName] = useState('');
@@ -608,19 +640,11 @@ export default function AdminRecords() {
           record.user_agent || '',
         ]);
       }
-      const classInfoRows = [
-        ['Course Name', session.course_name || 'N/A'],
-        ['Training Date', session.training_date || 'N/A'],
-        ['Time Started', formatDateTime(session.time_started)],
-        ['Class End Time', formatDateTime(session.time_stopped)],
-        ['Attendance Link Expires At', formatDateTime(session.expires_at)],
-        ['Trainer Name', session.trainer_name || 'N/A'],
-        ['Company Name', session.company_name || 'N/A'],
-        ['Training Location', session.training_location || 'N/A'],
-        ['Course Outline', session.course_outline || 'N/A'],
-        ['Total Students Attended', String(group.records.length)],
-        ['Generated At', generatedAt],
-      ];
+      const classInfoRows = getClassInfoRows(
+        session,
+        group.records.length,
+        generatedAt
+      );
 
       doc.setTextColor('#036f5e');
       doc.setFontSize(20);
@@ -748,6 +772,144 @@ export default function AdminRecords() {
     }
   }
 
+  async function downloadClassArchiveExcel(group) {
+    if (group.id === 'unassigned' || !group.session) return;
+
+    if (group.records.length === 0) {
+      setStatus('No attendance records to archive.');
+      return;
+    }
+
+    setStatus('');
+    setArchivingClassExcelId(group.id);
+
+    try {
+      const { session } = group;
+      const generatedAt = new Date().toLocaleString();
+      const classInfoRows = getClassInfoRows(
+        session,
+        group.records.length,
+        generatedAt
+      );
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = 'Attendance Tracker';
+      workbook.created = new Date();
+
+      const classInfoSheet = workbook.addWorksheet('Class Information');
+      classInfoSheet.columns = [{ width: 30 }, { width: 90 }];
+      classInfoSheet.addRow(['Attendance Class Archive']);
+      classInfoSheet.addRow(['Generated date/time', generatedAt]);
+      classInfoSheet.addRow(['Total number of records', group.records.length]);
+      classInfoSheet.addRow([]);
+      classInfoSheet.addRow(['Class Information', '']);
+      classInfoRows.forEach((row) => classInfoSheet.addRow(row));
+      classInfoSheet.getRow(1).font = { bold: true, size: 16, color: { argb: 'FF036F5E' } };
+      classInfoSheet.getRow(5).font = { bold: true };
+
+      const attendanceSheet = workbook.addWorksheet('Attendance Records');
+      attendanceSheet.columns = [
+        { header: 'Student Name', key: 'studentName', width: 24 },
+        { header: 'Student Email', key: 'studentEmail', width: 30 },
+        { header: 'Company', key: 'company', width: 24 },
+        { header: 'Signed Date/Time', key: 'signedAt', width: 24 },
+        { header: 'Latitude', key: 'latitude', width: 14 },
+        { header: 'Longitude', key: 'longitude', width: 14 },
+        { header: 'Location Accuracy', key: 'locationAccuracy', width: 18 },
+        { header: 'Student Photo', key: 'studentPhoto', width: 18 },
+        { header: 'Signature', key: 'signature', width: 24 },
+        { header: 'Possible Duplicate Device', key: 'isSuspicious', width: 24 },
+        { header: 'Suspicious Reason', key: 'suspiciousReason', width: 36 },
+        { header: 'Device ID', key: 'deviceId', width: 36 },
+        { header: 'User Agent', key: 'userAgent', width: 80 },
+      ];
+      attendanceSheet.views = [{ state: 'frozen', ySplit: 1 }];
+      attendanceSheet.autoFilter = {
+        from: 'A1',
+        to: 'M1',
+      };
+      attendanceSheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      attendanceSheet.getRow(1).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF036F5E' },
+      };
+
+      for (const record of group.records) {
+        const photoImage = await downloadArchiveImage(
+          'attendance-photos',
+          record.photo_path
+        );
+        const signatureImage = await downloadArchiveImage(
+          'signatures',
+          record.signature_path,
+          record.signature_url
+        );
+        const row = attendanceSheet.addRow({
+          studentName: record.student_name || '',
+          studentEmail: record.student_email || '',
+          company: record.company || 'N/A',
+          signedAt: formatDateTime(record.signed_at),
+          latitude: record.latitude ?? 'N/A',
+          longitude: record.longitude ?? 'N/A',
+          locationAccuracy: formatAccuracy(record.location_accuracy),
+          studentPhoto: photoImage ? '' : 'N/A',
+          signature: signatureImage ? '' : 'N/A',
+          isSuspicious: record.is_suspicious ? 'Yes' : 'No',
+          suspiciousReason: record.suspicious_reason || '',
+          deviceId: record.device_id || '',
+          userAgent: record.user_agent || '',
+        });
+
+        row.height = 62;
+
+        if (photoImage) {
+          const imageId = workbook.addImage({
+            base64: photoImage,
+            extension: getImageExtension(photoImage),
+          });
+          attendanceSheet.addImage(imageId, {
+            tl: { col: 7.15, row: row.number - 0.85 },
+            ext: { width: 58, height: 58 },
+          });
+        }
+
+        if (signatureImage) {
+          const imageId = workbook.addImage({
+            base64: signatureImage,
+            extension: getImageExtension(signatureImage),
+          });
+          attendanceSheet.addImage(imageId, {
+            tl: { col: 8.1, row: row.number - 0.78 },
+            ext: { width: 120, height: 42 },
+          });
+        }
+      }
+
+      attendanceSheet.eachRow((row) => {
+        row.alignment = { vertical: 'middle', wrapText: true };
+      });
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+
+      link.href = url;
+      link.download = getClassArchiveExcelFileName(session);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Class archive Excel generation error:', error);
+      setStatus(error.message || 'Failed to generate class archive Excel.');
+    } finally {
+      setArchivingClassExcelId(null);
+    }
+  }
+
   useEffect(() => {
     loadRecords();
   }, []);
@@ -822,6 +984,17 @@ export default function AdminRecords() {
                         {archivingClassId === group.id
                           ? 'Archiving...'
                           : 'Archive Class PDF'}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="secondary-button session-action-button archive-class-button"
+                        onClick={() => downloadClassArchiveExcel(group)}
+                        disabled={archivingClassExcelId === group.id}
+                      >
+                        {archivingClassExcelId === group.id
+                          ? 'Archiving Excel...'
+                          : 'Archive Class Excel'}
                       </button>
                     </>
                   )}

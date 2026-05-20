@@ -24,10 +24,10 @@ function App() {
           <div className="brand">
             <img
               src="/images/logo.png"
-              alt="Attendance Tracker logo"
+              alt="ExCourse logo"
               className="brand-logo"
             />
-            <h1>Attendance Tracker</h1>
+            <h1>ExCourse</h1>
           </div>
         </header>
 

@@ -792,7 +792,7 @@ export default function AdminRecords() {
         generatedAt
       );
       const workbook = new ExcelJS.Workbook();
-      workbook.creator = 'Attendance Tracker';
+      workbook.creator = 'ExCourse';
       workbook.created = new Date();
 
       const classInfoSheet = workbook.addWorksheet('Class Information');

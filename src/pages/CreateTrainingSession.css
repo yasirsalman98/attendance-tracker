@@ -16,6 +16,11 @@
   box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
 }
 
+.create-session-page h1,
+.create-session-page h2 {
+  color: #111827;
+}
+
 .create-session-header {
   margin-bottom: 28px;
 }

@@ -38,6 +38,8 @@ body {
 .top-bar h1 {
   margin: 0;
   font-size: 22px;
+  color: #036f5e;
+  font-weight: 700;
 }
 
 .top-bar nav {
@@ -67,6 +69,7 @@ main {
 
 .card h2 {
   margin-top: 0;
+  color: #111827;
 }
 
 .landing-message {

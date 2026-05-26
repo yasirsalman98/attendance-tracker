@@ -31,6 +31,7 @@
 
 .create-session-header h1 {
   margin: 0 0 10px;
+  color: #111827;
   font-size: clamp(2rem, 4vw, 3rem);
   line-height: 1.1;
 }
@@ -228,6 +229,7 @@
 
 .session-summary h2 {
   margin: 0 0 18px;
+  color: #111827;
 }
 
 .session-summary dl {
@@ -293,6 +295,7 @@
 
 .qr-code-copy h2 {
   margin: 0;
+  color: #111827;
   font-size: 1.35rem;
 }
 

@@ -221,6 +221,12 @@ function SignaturePreview({ record, onError }) {
         return;
       }
 
+      if (record.signature_url) {
+        setSignatureUrl(record.signature_url);
+        setIsLoading(false);
+        return;
+      }
+
       setIsLoading(true);
 
       const { data, error } = await supabase.storage
@@ -357,6 +363,12 @@ function TrainerSignaturePreview({ session, onError }) {
     async function loadSignatureUrl() {
       if (!session?.trainer_signature_path) {
         setSignatureUrl(session?.trainer_signature_url || '');
+        setIsLoading(false);
+        return;
+      }
+
+      if (session?.trainer_signature_url) {
+        setSignatureUrl(session.trainer_signature_url);
         setIsLoading(false);
         return;
       }

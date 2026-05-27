@@ -110,6 +110,12 @@ grant select, insert, update, delete on public.quiz_answer_choices to authentica
 grant select, insert, update, delete on public.quiz_attempts to authenticated;
 grant select, insert, update, delete on public.quiz_attempt_answers to authenticated;
 
+grant select, insert, update, delete on public.quiz_templates to service_role;
+grant select, insert, update, delete on public.quiz_questions to service_role;
+grant select, insert, update, delete on public.quiz_answer_choices to service_role;
+grant select, insert, update, delete on public.quiz_attempts to service_role;
+grant select, insert, update, delete on public.quiz_attempt_answers to service_role;
+
 drop policy if exists "Anon can manage quiz templates" on public.quiz_templates;
 drop policy if exists "Anon can read active quiz templates" on public.quiz_templates;
 create policy "Anon can read active quiz templates"

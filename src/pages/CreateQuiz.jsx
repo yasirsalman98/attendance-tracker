@@ -350,6 +350,27 @@ export default function CreateQuiz() {
     setIsLoadingQuizQuestions(false);
   }
 
+  function clearLoadedQuizQuestions() {
+    const confirmed = window.confirm(
+      'Clear the loaded quiz questions and start a blank quiz draft? This will not delete any saved quizzes.'
+    );
+
+    if (!confirmed) return;
+
+    setCourseName('');
+    setQuizTitle('');
+    setQuizDescription('');
+    setInstructorName('');
+    setClassDate(getTodayDateValue());
+    setPassingScore(80);
+    setQuestions([createQuestion()]);
+    setCreatedQuiz(null);
+    setCopied(false);
+    setSearchParams({});
+    setErrorMessage('');
+    setStatusMessage('Loaded questions cleared. You can start a new quiz draft.');
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
     setCreatedQuiz(null);
@@ -521,6 +542,14 @@ export default function CreateQuiz() {
                     disabled={!selectedSavedQuizId || isLoadingQuizQuestions}
                   >
                     {isLoadingQuizQuestions ? 'Loading Questions...' : 'Load Questions'}
+                  </button>
+
+                  <button
+                    type="button"
+                    className="secondary-button clear-loaded-quiz-button"
+                    onClick={clearLoadedQuizQuestions}
+                  >
+                    Clear Loaded Questions
                   </button>
                 </div>
               )}

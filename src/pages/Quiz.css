@@ -151,9 +151,19 @@
 
 .load-quiz-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   gap: 10px;
   align-items: center;
+}
+
+.clear-loaded-quiz-button {
+  border: 1px solid #dc2626;
+  background: #ffffff;
+  color: #dc2626;
+}
+
+.clear-loaded-quiz-button:hover {
+  background: #fef2f2;
 }
 
 .three-column-row {

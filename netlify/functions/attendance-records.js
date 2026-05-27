@@ -8,7 +8,7 @@ function jsonResponse(statusCode, body) {
   };
 }
 
-function getSupabaseClient(key) {
+function getSupabaseClient(key, accessToken = '') {
   const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 
   if (!supabaseUrl || !key) {
@@ -20,6 +20,13 @@ function getSupabaseClient(key) {
       autoRefreshToken: false,
       persistSession: false,
     },
+    global: accessToken
+      ? {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        }
+      : undefined,
   });
 }
 
@@ -38,7 +45,7 @@ export async function handler(event) {
   }
 
   const authClient = getSupabaseClient(anonKey);
-  const adminClient = getSupabaseClient(serviceRoleKey);
+  const adminClient = getSupabaseClient(serviceRoleKey || anonKey, serviceRoleKey ? '' : accessToken);
 
   if (!authClient || !adminClient) {
     return jsonResponse(500, { error: 'Supabase environment variables are missing.' });

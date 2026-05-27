@@ -271,7 +271,7 @@ function SignaturePreview({ record, onError }) {
 }
 
 function StudentPhotoThumbnail({ record, onOpen, onError }) {
-  const [photoUrl, setPhotoUrl] = useState('');
+  const [photoUrl, setPhotoUrl] = useState(record.photo_url || '');
   const [isLoading, setIsLoading] = useState(Boolean(record.photo_path));
 
   useEffect(() => {
@@ -279,7 +279,13 @@ function StudentPhotoThumbnail({ record, onOpen, onError }) {
 
     async function loadPhotoUrl() {
       if (!record.photo_path) {
-        setPhotoUrl('');
+        setPhotoUrl(record.photo_url || '');
+        setIsLoading(false);
+        return;
+      }
+
+      if (record.photo_url) {
+        setPhotoUrl(record.photo_url);
         setIsLoading(false);
         return;
       }
@@ -309,9 +315,9 @@ function StudentPhotoThumbnail({ record, onOpen, onError }) {
     return () => {
       isActive = false;
     };
-  }, [record.photo_path, onError]);
+  }, [record.photo_path, record.photo_url, onError]);
 
-  if (!record.photo_path) {
+  if (!record.photo_path && !record.photo_url) {
     return 'N/A';
   }
 
@@ -1244,7 +1250,7 @@ export default function AdminRecords() {
 
                 <div>
                   <dt>Course Outline</dt>
-                  <dd>{getSessionValue(group.session, 'course_outline')}</dd>
+                  <dd>{group.session?.course_outline || 'Not provided'}</dd>
                 </div>
 
                 <div>

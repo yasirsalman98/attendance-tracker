@@ -30,6 +30,21 @@ function getSupabaseClient(key, accessToken = '') {
   });
 }
 
+async function addSignedUrl(client, bucketName, filePath) {
+  if (!filePath) return '';
+
+  const { data, error } = await client.storage
+    .from(bucketName)
+    .createSignedUrl(filePath, 300);
+
+  if (error) {
+    console.error(`Signed URL error for ${bucketName}/${filePath}:`, error);
+    return '';
+  }
+
+  return data?.signedUrl || '';
+}
+
 export async function handler(event) {
   if (event.httpMethod !== 'GET') {
     return jsonResponse(405, { error: 'Method not allowed.' });
@@ -70,5 +85,36 @@ export async function handler(event) {
     return jsonResponse(500, { error: error.message || 'Unable to load records.' });
   }
 
-  return jsonResponse(200, { records: data || [] });
+  const records = await Promise.all(
+    (data || []).map(async (record) => {
+      const session = record.training_sessions;
+      const trainerSignatureUrl =
+        session?.trainer_signature_url ||
+        (await addSignedUrl(
+          adminClient,
+          'signatures',
+          session?.trainer_signature_path
+        ));
+
+      return {
+        ...record,
+        signature_url:
+          record.signature_url ||
+          (await addSignedUrl(adminClient, 'signatures', record.signature_path)),
+        photo_url: await addSignedUrl(
+          adminClient,
+          'attendance-photos',
+          record.photo_path
+        ),
+        training_sessions: session
+          ? {
+              ...session,
+              trainer_signature_url: trainerSignatureUrl,
+            }
+          : session,
+      };
+    })
+  );
+
+  return jsonResponse(200, { records });
 }

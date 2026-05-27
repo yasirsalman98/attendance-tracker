@@ -44,13 +44,43 @@ body {
 
 .top-bar nav {
   display: flex;
-  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .top-bar a {
   color: #036f5e;
   text-decoration: none;
   font-weight: 600;
+}
+
+.admin-header-nav {
+  align-items: center;
+}
+
+.header-nav-button,
+.logout-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: 9px 14px;
+  border-radius: 8px;
+  background: #e5e7eb;
+  color: #111827;
+  font-size: 15px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.logout-button {
+  border: 0;
+}
+
+.header-nav-button:hover,
+.logout-button:hover {
+  background: #d1d5db;
 }
 
 main {
@@ -75,6 +105,67 @@ main {
 .landing-message {
   max-width: 720px;
   margin: 64px auto;
+}
+
+.login-page {
+  min-height: calc(100vh - 130px);
+  display: grid;
+  place-items: center;
+  padding: 24px 0;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 460px;
+  padding: 28px;
+  border: 1px solid #ddd;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+}
+
+.login-header {
+  margin-bottom: 22px;
+  text-align: center;
+}
+
+.login-header .eyebrow {
+  margin: 0 0 8px;
+  color: #036f5e;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.login-header h2 {
+  margin: 0 0 8px;
+  color: #111827;
+  font-size: 2rem;
+}
+
+.login-header p {
+  margin: 0;
+  color: #52616f;
+  line-height: 1.5;
+}
+
+.login-form {
+  display: grid;
+  gap: 16px;
+}
+
+.show-password-control {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 8px;
+  color: #374151;
+  font-weight: 600;
+}
+
+.show-password-control input {
+  width: auto;
 }
 
 .landing-message p,
@@ -255,6 +346,13 @@ button:disabled {
   color: #111827;
 }
 
+.admin-link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 .status {
   font-weight: 600;
 }
@@ -295,11 +393,33 @@ button:disabled {
   margin-bottom: 16px;
 }
 
+.session-record-card-collapsed .session-record-top-row {
+  margin-bottom: 0;
+}
+
+.session-record-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
 .session-record-top-row h3 {
   margin: 0;
   color: #111827;
   font-size: 22px;
   line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.session-expand-button {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 7px;
+  font-size: 16px;
+  line-height: 1;
 }
 
 .session-card-actions {
@@ -504,6 +624,10 @@ th {
 
   .session-card-actions {
     justify-content: flex-start;
+  }
+
+  .session-record-title-row {
+    align-items: flex-start;
   }
 
   .session-meta {

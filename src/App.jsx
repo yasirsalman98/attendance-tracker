@@ -1,8 +1,31 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  BrowserRouter,
+  Link,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from 'react-router-dom';
 import AttendanceForm from './pages/AttendanceForm';
 import AdminRecords from './pages/AdminRecords';
 import CreateTrainingSession from './pages/CreateTrainingSession';
+import CreateQuiz from './pages/CreateQuiz';
+import InstructorDashboard from './pages/InstructorDashboard';
+import Login from './pages/Login';
+import QuizResults from './pages/QuizResults';
+import StudentQuiz from './pages/StudentQuiz';
+import { supabase } from './supabaseClient';
 import './App.css';
+
+const protectedPaths = [
+  '/instructor-7392',
+  '/create-session-7392',
+  '/create-quiz-7392',
+  '/records-7392',
+  '/quiz-results-7392',
+];
 
 function LandingPage() {
   return (
@@ -16,30 +39,171 @@ function LandingPage() {
   );
 }
 
+function LoadingPage() {
+  return (
+    <section className="landing-message card">
+      <h2>Loading</h2>
+      <p>Checking login status...</p>
+    </section>
+  );
+}
+
+function ProtectedRoute({ session, isAuthLoading, children }) {
+  if (isAuthLoading) {
+    return <LoadingPage />;
+  }
+
+  if (!session) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return children;
+}
+
+function LoginRoute({ session, isAuthLoading }) {
+  if (isAuthLoading) {
+    return <LoadingPage />;
+  }
+
+  if (session) {
+    return <Navigate to="/instructor-7392" replace />;
+  }
+
+  return <Login />;
+}
+
+function AppShell() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [session, setSession] = useState(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const isProtectedPage = useMemo(
+    () => protectedPaths.some((path) => location.pathname === path),
+    [location.pathname]
+  );
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadSession() {
+      const { data, error } = await supabase.auth.getSession();
+
+      if (!isActive) return;
+
+      if (error) {
+        console.error('Supabase session error:', error);
+      }
+
+      setSession(data?.session || null);
+      setIsAuthLoading(false);
+    }
+
+    loadSession();
+
+    const { data: authListener } = supabase.auth.onAuthStateChange(
+      (_event, nextSession) => {
+        setSession(nextSession);
+        setIsAuthLoading(false);
+      }
+    );
+
+    return () => {
+      isActive = false;
+      authListener?.subscription?.unsubscribe();
+    };
+  }, []);
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    navigate('/login', { replace: true });
+  }
+
+  return (
+    <div className="app-shell">
+      <header className="top-bar">
+        <div className="brand">
+          <img
+            src="/images/logo.png"
+            alt="ExCourse logo"
+            className="brand-logo"
+          />
+          <h1>ExCourse</h1>
+        </div>
+
+        {session && isProtectedPage && (
+          <nav className="admin-header-nav" aria-label="Instructor navigation">
+            <Link to="/instructor-7392" className="header-nav-button">
+              Instructor Dashboard
+            </Link>
+            <Link to="/records-7392" className="header-nav-button">
+              Attendance Records
+            </Link>
+            <Link to="/quiz-results-7392" className="header-nav-button">
+              Quizes
+            </Link>
+            <button type="button" className="logout-button" onClick={handleLogout}>
+              Logout
+            </button>
+          </nav>
+        )}
+      </header>
+
+      <main>
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/login" element={<LoginRoute session={session} isAuthLoading={isAuthLoading} />} />
+          <Route path="/attendance/session/:sessionId" element={<AttendanceForm />} />
+          <Route path="/quiz/:quizId" element={<StudentQuiz />} />
+          <Route
+            path="/instructor-7392"
+            element={
+              <ProtectedRoute session={session} isAuthLoading={isAuthLoading}>
+                <InstructorDashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/create-session-7392"
+            element={
+              <ProtectedRoute session={session} isAuthLoading={isAuthLoading}>
+                <CreateTrainingSession />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/create-quiz-7392"
+            element={
+              <ProtectedRoute session={session} isAuthLoading={isAuthLoading}>
+                <CreateQuiz />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/quiz-results-7392"
+            element={
+              <ProtectedRoute session={session} isAuthLoading={isAuthLoading}>
+                <QuizResults />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/records-7392"
+            element={
+              <ProtectedRoute session={session} isAuthLoading={isAuthLoading}>
+                <AdminRecords />
+              </ProtectedRoute>
+            }
+          />
+        </Routes>
+      </main>
+    </div>
+  );
+}
+
 function App() {
   return (
     <BrowserRouter>
-      <div className="app-shell">
-        <header className="top-bar">
-          <div className="brand">
-            <img
-              src="/images/logo.png"
-              alt="ExCourse logo"
-              className="brand-logo"
-            />
-            <h1>ExCourse</h1>
-          </div>
-        </header>
-
-        <main>
-          <Routes>
-            <Route path="/" element={<LandingPage />} />
-            <Route path="/attendance/session/:sessionId" element={<AttendanceForm />} />
-            <Route path="/create-session-7392" element={<CreateTrainingSession />} />
-            <Route path="/records-7392" element={<AdminRecords />} />
-          </Routes>
-        </main>
-      </div>
+      <AppShell />
     </BrowserRouter>
   );
 }

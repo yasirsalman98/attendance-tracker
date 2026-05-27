@@ -27,6 +27,28 @@ function getSessionValue(session, key) {
   return session?.[key] || 'N/A';
 }
 
+function getUniqueSessionIds(records) {
+  return [
+    ...new Set(
+      records
+        .map((record) => record.training_session_id)
+        .filter(Boolean)
+    ),
+  ];
+}
+
+function mergeRecordSessions(records, sessions) {
+  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+
+  return records.map((record) => ({
+    ...record,
+    training_sessions:
+      record.training_sessions ||
+      sessionsById.get(record.training_session_id) ||
+      null,
+  }));
+}
+
 function getDownloadFileName(contentDisposition, fallbackName) {
   const match = contentDisposition?.match(/filename="?([^"]+)"?/i);
   return match?.[1] || fallbackName;
@@ -243,6 +265,7 @@ function SignaturePreview({ record, onError }) {
       src={signatureUrl}
       alt={`Signature for ${record.student_name}`}
       className="signature-preview"
+      onError={() => onError('Unable to load student signature.')}
     />
   );
 }
@@ -314,6 +337,63 @@ function StudentPhotoThumbnail({ record, onOpen, onError }) {
   );
 }
 
+function TrainerSignaturePreview({ session, onError }) {
+  const [signatureUrl, setSignatureUrl] = useState(
+    session?.trainer_signature_url || ''
+  );
+  const [isLoading, setIsLoading] = useState(
+    Boolean(session?.trainer_signature_path)
+  );
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadSignatureUrl() {
+      if (!session?.trainer_signature_path) {
+        setSignatureUrl(session?.trainer_signature_url || '');
+        setIsLoading(false);
+        return;
+      }
+
+      setIsLoading(true);
+
+      const { data, error } = await supabase.storage
+        .from('signatures')
+        .createSignedUrl(session.trainer_signature_path, 300);
+
+      if (!isActive) return;
+
+      if (error) {
+        console.error('Trainer signature URL error:', error);
+        onError?.('Unable to load trainer signature.');
+        setSignatureUrl('');
+      } else {
+        setSignatureUrl(data?.signedUrl || '');
+      }
+
+      setIsLoading(false);
+    }
+
+    loadSignatureUrl();
+
+    return () => {
+      isActive = false;
+    };
+  }, [session?.trainer_signature_path, session?.trainer_signature_url, onError]);
+
+  if (isLoading) return 'Loading...';
+  if (!signatureUrl) return 'N/A';
+
+  return (
+    <img
+      src={signatureUrl}
+      alt="Trainer signature"
+      className="signature-preview"
+      onError={() => onError?.('Unable to load trainer signature.')}
+    />
+  );
+}
+
 export default function AdminRecords() {
   const [records, setRecords] = useState([]);
   const [status, setStatus] = useState('Loading records...');
@@ -326,6 +406,7 @@ export default function AdminRecords() {
   const [selectedPhotoAlt, setSelectedPhotoAlt] = useState('');
   const [selectedPhotoFileName, setSelectedPhotoFileName] = useState('');
   const [photoModalError, setPhotoModalError] = useState('');
+  const [expandedSessionIds, setExpandedSessionIds] = useState(() => new Set());
 
   const groupedRecords = useMemo(() => groupRecordsBySession(records), [records]);
   const handleMediaLoadError = useCallback((message) => {
@@ -345,6 +426,27 @@ export default function AdminRecords() {
     setSelectedPhotoAlt('');
     setSelectedPhotoFileName('');
     setPhotoModalError('');
+  }
+
+  function toggleSessionExpanded(sessionId) {
+    setExpandedSessionIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+
+      if (nextIds.has(sessionId)) {
+        nextIds.delete(sessionId);
+      } else {
+        nextIds.add(sessionId);
+      }
+
+      return nextIds;
+    });
+  }
+
+  function showLoadedRecords(nextRecords) {
+    setRecords(nextRecords);
+    setExpandedSessionIds(
+      new Set(groupRecordsBySession(nextRecords).map((group) => group.id))
+    );
   }
 
   async function downloadSelectedPhoto() {
@@ -378,6 +480,49 @@ export default function AdminRecords() {
     setStatus('Loading records...');
     setPhotoModalError('');
 
+    const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+    const accessToken = sessionData?.session?.access_token;
+
+    if (sessionError || !accessToken) {
+      console.error('Attendance records auth error:', sessionError);
+      setStatus('Please sign in again to view attendance records.');
+      return;
+    }
+
+    try {
+      const response = await fetch('/.netlify/functions/attendance-records', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+
+      const contentType = response.headers.get('Content-Type') || '';
+
+      if (response.ok && contentType.includes('application/json')) {
+        const data = await response.json().catch(() => null);
+
+        if (Array.isArray(data?.records)) {
+          showLoadedRecords(data.records);
+          setStatus('');
+          return;
+        }
+      }
+
+      if (!isLocalHost()) {
+        const data = await response.json().catch(() => null);
+        setStatus(data?.error || 'Unable to load attendance records.');
+        return;
+      }
+    } catch (error) {
+      if (!isLocalHost()) {
+        console.error('Attendance records function error:', error);
+        setStatus('Unable to load attendance records.');
+        return;
+      }
+
+      console.warn('Attendance records function unavailable locally, using direct Supabase query.');
+    }
+
     const result = await supabase
       .from('attendance_records')
       .select(`
@@ -392,7 +537,31 @@ export default function AdminRecords() {
       return;
     }
 
-    setRecords(result.data || []);
+    const loadedRecords = result.data || [];
+    const sessionIds = getUniqueSessionIds(loadedRecords);
+    const recordsMissingSessions = loadedRecords.some(
+      (record) => record.training_session_id && !record.training_sessions
+    );
+
+    if (sessionIds.length > 0 && recordsMissingSessions) {
+      const sessionsResult = await supabase
+        .from('training_sessions')
+        .select('*')
+        .in('id', sessionIds);
+
+      if (sessionsResult.error) {
+        console.error(sessionsResult.error);
+        showLoadedRecords(loadedRecords);
+        setStatus(sessionsResult.error.message);
+        return;
+      }
+
+      showLoadedRecords(mergeRecordSessions(loadedRecords, sessionsResult.data || []));
+      setStatus('');
+      return;
+    }
+
+    showLoadedRecords(loadedRecords);
     setStatus('');
   }
 
@@ -911,7 +1080,11 @@ export default function AdminRecords() {
   }
 
   useEffect(() => {
-    loadRecords();
+    const timerId = window.setTimeout(() => {
+      loadRecords();
+    }, 0);
+
+    return () => window.clearTimeout(timerId);
   }, []);
 
   return (
@@ -939,10 +1112,30 @@ export default function AdminRecords() {
 
       {groupedRecords.length > 0 && (
         <div className="session-records-list">
-          {groupedRecords.map((group) => (
-            <section className="session-record-card" key={group.id}>
+          {groupedRecords.map((group) => {
+            const isExpanded = expandedSessionIds.has(group.id);
+            const classTitle = group.title || getSessionValue(group.session, 'course_name');
+
+            return (
+            <section
+              className={`session-record-card ${
+                isExpanded ? 'session-record-card-expanded' : 'session-record-card-collapsed'
+              }`}
+              key={group.id}
+            >
               <div className="session-record-top-row">
-                <h3>{group.title || getSessionValue(group.session, 'course_name')}</h3>
+                <div className="session-record-title-row">
+                  <button
+                    type="button"
+                    className="secondary-button session-expand-button"
+                    onClick={() => toggleSessionExpanded(group.id)}
+                    aria-expanded={isExpanded}
+                    aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${classTitle}`}
+                  >
+                    <span aria-hidden="true">{isExpanded ? 'v' : '>'}</span>
+                  </button>
+                  <h3>{classTitle}</h3>
+                </div>
 
                 <div className="session-card-actions">
                   {group.id !== 'unassigned' && (
@@ -1001,10 +1194,22 @@ export default function AdminRecords() {
                 </div>
               </div>
 
+              {isExpanded && (
+                <>
               <dl className="session-meta">
+                <div>
+                  <dt>Course Name</dt>
+                  <dd>{getSessionValue(group.session, 'course_name')}</dd>
+                </div>
+
                 <div>
                   <dt>Training Date</dt>
                   <dd>{getSessionValue(group.session, 'training_date')}</dd>
+                </div>
+
+                <div>
+                  <dt>Created At</dt>
+                  <dd>{formatDateTime(group.session?.created_at)}</dd>
                 </div>
 
                 <div>
@@ -1035,6 +1240,21 @@ export default function AdminRecords() {
                 <div>
                   <dt>Expires At</dt>
                   <dd>{formatDateTime(group.session?.expires_at)}</dd>
+                </div>
+
+                <div>
+                  <dt>Course Outline</dt>
+                  <dd>{getSessionValue(group.session, 'course_outline')}</dd>
+                </div>
+
+                <div>
+                  <dt>Trainer Signature</dt>
+                  <dd>
+                    <TrainerSignaturePreview
+                      session={group.session}
+                      onError={handleMediaLoadError}
+                    />
+                  </dd>
                 </div>
 
                 <div>
@@ -1119,8 +1339,11 @@ export default function AdminRecords() {
                   </tbody>
                 </table>
               </div>
+                </>
+              )}
             </section>
-          ))}
+            );
+          })}
         </div>
       )}
 

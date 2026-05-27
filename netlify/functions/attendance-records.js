@@ -45,7 +45,7 @@ export async function handler(event) {
   }
 
   const authClient = getSupabaseClient(anonKey);
-  const adminClient = getSupabaseClient(serviceRoleKey || anonKey, serviceRoleKey ? '' : accessToken);
+  const adminClient = getSupabaseClient(serviceRoleKey || anonKey);
 
   if (!authClient || !adminClient) {
     return jsonResponse(500, { error: 'Supabase environment variables are missing.' });

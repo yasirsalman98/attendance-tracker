@@ -62,7 +62,9 @@ export default function CreateQuiz() {
   const [createdQuiz, setCreatedQuiz] = useState(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
+  const [draftStatusMessage, setDraftStatusMessage] = useState('');
+  const [savingAction, setSavingAction] = useState('');
+  const [savedDraftId, setSavedDraftId] = useState('');
   const [copied, setCopied] = useState(false);
   const [savedQuizzes, setSavedQuizzes] = useState([]);
   const [selectedSavedQuizId, setSelectedSavedQuizId] = useState('');
@@ -85,6 +87,7 @@ export default function CreateQuiz() {
 
       setErrorMessage('');
       setStatusMessage('Loading saved quiz...');
+      setDraftStatusMessage('');
 
       const { data, error } = await supabase
         .from('quiz_templates')
@@ -270,11 +273,12 @@ export default function CreateQuiz() {
     setShowLoadQuizPanel(true);
     setErrorMessage('');
     setStatusMessage('Loading saved quizzes...');
+    setDraftStatusMessage('');
     setIsLoadingSavedQuizzes(true);
 
     const { data, error } = await supabase
       .from('quiz_templates')
-      .select('id, course_name, quiz_title, class_date, created_at')
+      .select('id, course_name, quiz_title, class_date, is_active, created_at')
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -305,6 +309,7 @@ export default function CreateQuiz() {
 
     setErrorMessage('');
     setStatusMessage('Loading quiz questions...');
+    setDraftStatusMessage('');
     setIsLoadingQuizQuestions(true);
 
     const { data, error } = await supabase
@@ -342,6 +347,7 @@ export default function CreateQuiz() {
       setPassingScore(data.passing_score ?? 80);
       setQuestions(loadedQuestions.length ? loadedQuestions : [createQuestion()]);
       setCreatedQuiz(null);
+      setSavedDraftId('');
       setCopied(false);
       setSearchParams({});
       setStatusMessage('Saved quiz questions loaded. Review them, then save to create a new quiz link.');
@@ -365,17 +371,19 @@ export default function CreateQuiz() {
     setPassingScore(80);
     setQuestions([createQuestion()]);
     setCreatedQuiz(null);
+    setSavedDraftId('');
     setCopied(false);
     setSearchParams({});
     setErrorMessage('');
+    setDraftStatusMessage('');
     setStatusMessage('Loaded questions cleared. You can start a new quiz draft.');
   }
 
-  async function handleSubmit(event) {
-    event.preventDefault();
+  async function saveQuiz({ publish }) {
     setCreatedQuiz(null);
     setCopied(false);
     setStatusMessage('');
+    setDraftStatusMessage('');
 
     const validationMessage = validateQuiz();
 
@@ -385,23 +393,50 @@ export default function CreateQuiz() {
     }
 
     setErrorMessage('');
-    setIsSaving(true);
+    setSavingAction(publish ? 'publish' : 'draft');
 
     try {
-      const { data: quizTemplate, error: quizError } = await supabase
-        .from('quiz_templates')
-        .insert({
-          course_name: courseName.trim(),
-          quiz_title: quizTitle.trim(),
-          quiz_description: quizDescription.trim() || null,
-          instructor_name: instructorName.trim() || null,
-          class_date: classDate || null,
-          passing_score: Number(passingScore),
-        })
-        .select()
-        .single();
+      const quizPayload = {
+        course_name: courseName.trim(),
+        quiz_title: quizTitle.trim(),
+        quiz_description: quizDescription.trim() || null,
+        instructor_name: instructorName.trim() || null,
+        class_date: classDate || null,
+        passing_score: Number(passingScore),
+        is_active: publish,
+      };
 
-      if (quizError) throw quizError;
+      let quizTemplate;
+
+      if (savedDraftId) {
+        const { data: updatedQuizTemplate, error: quizError } = await supabase
+          .from('quiz_templates')
+          .update(quizPayload)
+          .eq('id', savedDraftId)
+          .select()
+          .single();
+
+        if (quizError) throw quizError;
+
+        const { error: deleteQuestionsError } = await supabase
+          .from('quiz_questions')
+          .delete()
+          .eq('quiz_template_id', updatedQuizTemplate.id);
+
+        if (deleteQuestionsError) throw deleteQuestionsError;
+
+        quizTemplate = updatedQuizTemplate;
+      } else {
+        const { data: insertedQuizTemplate, error: quizError } = await supabase
+          .from('quiz_templates')
+          .insert(quizPayload)
+          .select()
+          .single();
+
+        if (quizError) throw quizError;
+
+        quizTemplate = insertedQuizTemplate;
+      }
 
       for (let questionIndex = 0; questionIndex < questions.length; questionIndex += 1) {
         const question = questions[questionIndex];
@@ -432,15 +467,27 @@ export default function CreateQuiz() {
         if (choicesError) throw choicesError;
       }
 
-      setCreatedQuiz(quizTemplate);
-      setSearchParams({ quizId: quizTemplate.id });
-      setStatusMessage('Quiz created successfully.');
+      if (publish) {
+        setSavedDraftId('');
+        setCreatedQuiz(quizTemplate);
+        setSearchParams({ quizId: quizTemplate.id });
+        setStatusMessage('Quiz published successfully.');
+      } else {
+        setSavedDraftId(quizTemplate.id);
+        setSearchParams({});
+        setDraftStatusMessage('Draft saved. Students will not see it until you publish.');
+      }
     } catch (error) {
       console.error('Create quiz error:', error);
-      setErrorMessage(error?.message || 'Unable to create the quiz.');
+      setErrorMessage(error?.message || 'Unable to save the quiz.');
     } finally {
-      setIsSaving(false);
+      setSavingAction('');
     }
+  }
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    saveQuiz({ publish: true });
   }
 
   async function handleCopyLink() {
@@ -530,6 +577,7 @@ export default function CreateQuiz() {
                       savedQuizzes.map((quiz) => (
                         <option key={quiz.id} value={quiz.id}>
                           {quiz.course_name} - {quiz.quiz_title}
+                          {quiz.is_active ? '' : ' (Draft)'}
                         </option>
                       ))
                     )}
@@ -739,9 +787,30 @@ export default function CreateQuiz() {
               </div>
             </div>
 
-            <button className="primary-button" type="submit" disabled={isSaving}>
-              {isSaving ? 'Saving Quiz...' : 'Save Quiz'}
-            </button>
+            <div className="quiz-save-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => saveQuiz({ publish: false })}
+                disabled={Boolean(savingAction)}
+              >
+                {savingAction === 'draft' ? 'Saving Draft...' : 'Save as Draft'}
+              </button>
+
+              <button
+                className="primary-button"
+                type="submit"
+                disabled={Boolean(savingAction)}
+              >
+                {savingAction === 'publish' ? 'Publishing...' : 'Save & Publish'}
+              </button>
+            </div>
+
+            {draftStatusMessage && (
+              <div className="alert alert-success quiz-bottom-status" role="status">
+                {draftStatusMessage}
+              </div>
+            )}
           </form>
         ) : (
           <section className="quiz-created">

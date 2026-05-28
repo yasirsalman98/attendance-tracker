@@ -473,7 +473,9 @@ export default function AttendanceForm() {
         });
 
       if (uploadResult.error) {
-        throw uploadResult.error;
+        throw new Error(
+          `Unable to upload attendance signature: ${uploadResult.error.message}`
+        );
       }
 
       setStatus('Uploading photo... / Subiendo foto...');
@@ -487,7 +489,9 @@ export default function AttendanceForm() {
         });
 
       if (photoUploadResult.error) {
-        throw photoUploadResult.error;
+        throw new Error(
+          `Unable to upload attendance photo: ${photoUploadResult.error.message}`
+        );
       }
 
       setStatus('Saving attendance record... / Guardando registro de asistencia...');
@@ -508,7 +512,9 @@ export default function AttendanceForm() {
       });
 
       if (insertResult.error) {
-        throw insertResult.error;
+        throw new Error(
+          `Unable to save attendance record: ${insertResult.error.message}`
+        );
       }
 
       setStudentName('');

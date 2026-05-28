@@ -9,9 +9,23 @@ create table if not exists public.quiz_templates (
   class_date date,
   passing_score numeric not null default 80,
   is_active boolean not null default true,
+  owner_user_id uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.quiz_templates
+add column if not exists owner_user_id uuid references auth.users(id) on delete set null;
+
+create index if not exists quiz_templates_owner_user_id_idx
+  on public.quiz_templates (owner_user_id);
+
+update public.quiz_templates
+set owner_user_id = (
+  select id from auth.users order by created_at asc limit 1
+)
+where owner_user_id is null
+  and exists (select 1 from auth.users);
 
 create table if not exists public.quiz_questions (
   id uuid primary key default gen_random_uuid(),
@@ -90,7 +104,7 @@ alter table public.quiz_answer_choices enable row level security;
 alter table public.quiz_attempts enable row level security;
 alter table public.quiz_attempt_answers enable row level security;
 
-grant usage on schema public to anon, authenticated;
+grant usage on schema public to anon, authenticated, service_role;
 
 revoke insert, update, delete on public.quiz_templates from anon;
 revoke insert, update, delete on public.quiz_questions from anon;
@@ -130,7 +144,14 @@ create policy "Anon can read quiz questions"
 on public.quiz_questions
 for select
 to anon
-using (true);
+using (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_questions.quiz_template_id
+      and quiz_templates.is_active = true
+  )
+);
 
 drop policy if exists "Anon can manage quiz answer choices" on public.quiz_answer_choices;
 drop policy if exists "Anon can read quiz answer choices" on public.quiz_answer_choices;
@@ -138,7 +159,16 @@ create policy "Anon can read quiz answer choices"
 on public.quiz_answer_choices
 for select
 to anon
-using (true);
+using (
+  exists (
+    select 1
+    from public.quiz_questions
+    join public.quiz_templates
+      on quiz_templates.id = quiz_questions.quiz_template_id
+    where quiz_questions.id = quiz_answer_choices.question_id
+      and quiz_templates.is_active = true
+  )
+);
 
 drop policy if exists "Anon can manage quiz attempts" on public.quiz_attempts;
 drop policy if exists "Anon can create quiz attempts" on public.quiz_attempts;
@@ -146,7 +176,14 @@ create policy "Anon can create quiz attempts"
 on public.quiz_attempts
 for insert
 to anon
-with check (true);
+with check (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_attempts.quiz_template_id
+      and quiz_templates.is_active = true
+  )
+);
 
 drop policy if exists "Anon can manage quiz attempt answers" on public.quiz_attempt_answers;
 drop policy if exists "Anon can create quiz attempt answers" on public.quiz_attempt_answers;
@@ -157,41 +194,302 @@ to anon
 with check (true);
 
 drop policy if exists "Authenticated can manage quiz templates" on public.quiz_templates;
-create policy "Authenticated can manage quiz templates"
+drop policy if exists "Authenticated can create own quiz templates" on public.quiz_templates;
+create policy "Authenticated can create own quiz templates"
 on public.quiz_templates
-for all
+for insert
 to authenticated
-using (true)
-with check (true);
+with check (owner_user_id = auth.uid());
+
+drop policy if exists "Authenticated can read own quiz templates" on public.quiz_templates;
+create policy "Authenticated can read own quiz templates"
+on public.quiz_templates
+for select
+to authenticated
+using (owner_user_id = auth.uid());
+
+drop policy if exists "Authenticated can update own quiz templates" on public.quiz_templates;
+create policy "Authenticated can update own quiz templates"
+on public.quiz_templates
+for update
+to authenticated
+using (owner_user_id = auth.uid())
+with check (owner_user_id = auth.uid());
+
+drop policy if exists "Authenticated can delete own quiz templates" on public.quiz_templates;
+create policy "Authenticated can delete own quiz templates"
+on public.quiz_templates
+for delete
+to authenticated
+using (owner_user_id = auth.uid());
 
 drop policy if exists "Authenticated can manage quiz questions" on public.quiz_questions;
-create policy "Authenticated can manage quiz questions"
+drop policy if exists "Authenticated can create own quiz questions" on public.quiz_questions;
+create policy "Authenticated can create own quiz questions"
 on public.quiz_questions
-for all
+for insert
 to authenticated
-using (true)
-with check (true);
+with check (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_questions.quiz_template_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
+
+drop policy if exists "Authenticated can read own quiz questions" on public.quiz_questions;
+create policy "Authenticated can read own quiz questions"
+on public.quiz_questions
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_questions.quiz_template_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
+
+drop policy if exists "Authenticated can update own quiz questions" on public.quiz_questions;
+create policy "Authenticated can update own quiz questions"
+on public.quiz_questions
+for update
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_questions.quiz_template_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_questions.quiz_template_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
+
+drop policy if exists "Authenticated can delete own quiz questions" on public.quiz_questions;
+create policy "Authenticated can delete own quiz questions"
+on public.quiz_questions
+for delete
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_questions.quiz_template_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
 
 drop policy if exists "Authenticated can manage quiz answer choices" on public.quiz_answer_choices;
-create policy "Authenticated can manage quiz answer choices"
+drop policy if exists "Authenticated can create own quiz answer choices" on public.quiz_answer_choices;
+create policy "Authenticated can create own quiz answer choices"
 on public.quiz_answer_choices
-for all
+for insert
 to authenticated
-using (true)
-with check (true);
+with check (
+  exists (
+    select 1
+    from public.quiz_questions
+    join public.quiz_templates
+      on quiz_templates.id = quiz_questions.quiz_template_id
+    where quiz_questions.id = quiz_answer_choices.question_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
+
+drop policy if exists "Authenticated can read own quiz answer choices" on public.quiz_answer_choices;
+create policy "Authenticated can read own quiz answer choices"
+on public.quiz_answer_choices
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_questions
+    join public.quiz_templates
+      on quiz_templates.id = quiz_questions.quiz_template_id
+    where quiz_questions.id = quiz_answer_choices.question_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
+
+drop policy if exists "Authenticated can update own quiz answer choices" on public.quiz_answer_choices;
+create policy "Authenticated can update own quiz answer choices"
+on public.quiz_answer_choices
+for update
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_questions
+    join public.quiz_templates
+      on quiz_templates.id = quiz_questions.quiz_template_id
+    where quiz_questions.id = quiz_answer_choices.question_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.quiz_questions
+    join public.quiz_templates
+      on quiz_templates.id = quiz_questions.quiz_template_id
+    where quiz_questions.id = quiz_answer_choices.question_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
+
+drop policy if exists "Authenticated can delete own quiz answer choices" on public.quiz_answer_choices;
+create policy "Authenticated can delete own quiz answer choices"
+on public.quiz_answer_choices
+for delete
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_questions
+    join public.quiz_templates
+      on quiz_templates.id = quiz_questions.quiz_template_id
+    where quiz_questions.id = quiz_answer_choices.question_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
 
 drop policy if exists "Authenticated can manage quiz attempts" on public.quiz_attempts;
-create policy "Authenticated can manage quiz attempts"
+drop policy if exists "Authenticated can create active quiz attempts" on public.quiz_attempts;
+create policy "Authenticated can create active quiz attempts"
 on public.quiz_attempts
-for all
+for insert
 to authenticated
-using (true)
-with check (true);
+with check (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_attempts.quiz_template_id
+      and quiz_templates.is_active = true
+  )
+);
+
+drop policy if exists "Authenticated can read own quiz attempts" on public.quiz_attempts;
+create policy "Authenticated can read own quiz attempts"
+on public.quiz_attempts
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_attempts.quiz_template_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
+
+drop policy if exists "Authenticated can update own quiz attempts" on public.quiz_attempts;
+create policy "Authenticated can update own quiz attempts"
+on public.quiz_attempts
+for update
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_attempts.quiz_template_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_attempts.quiz_template_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
+
+drop policy if exists "Authenticated can delete own quiz attempts" on public.quiz_attempts;
+create policy "Authenticated can delete own quiz attempts"
+on public.quiz_attempts
+for delete
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_templates
+    where quiz_templates.id = quiz_attempts.quiz_template_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
 
 drop policy if exists "Authenticated can manage quiz attempt answers" on public.quiz_attempt_answers;
-create policy "Authenticated can manage quiz attempt answers"
+drop policy if exists "Authenticated can create quiz attempt answers" on public.quiz_attempt_answers;
+create policy "Authenticated can create quiz attempt answers"
 on public.quiz_attempt_answers
-for all
+for insert
 to authenticated
-using (true)
 with check (true);
+
+drop policy if exists "Authenticated can read own quiz attempt answers" on public.quiz_attempt_answers;
+create policy "Authenticated can read own quiz attempt answers"
+on public.quiz_attempt_answers
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_attempts
+    join public.quiz_templates
+      on quiz_templates.id = quiz_attempts.quiz_template_id
+    where quiz_attempts.id = quiz_attempt_answers.quiz_attempt_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
+
+drop policy if exists "Authenticated can update own quiz attempt answers" on public.quiz_attempt_answers;
+create policy "Authenticated can update own quiz attempt answers"
+on public.quiz_attempt_answers
+for update
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_attempts
+    join public.quiz_templates
+      on quiz_templates.id = quiz_attempts.quiz_template_id
+    where quiz_attempts.id = quiz_attempt_answers.quiz_attempt_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.quiz_attempts
+    join public.quiz_templates
+      on quiz_templates.id = quiz_attempts.quiz_template_id
+    where quiz_attempts.id = quiz_attempt_answers.quiz_attempt_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);
+
+drop policy if exists "Authenticated can delete own quiz attempt answers" on public.quiz_attempt_answers;
+create policy "Authenticated can delete own quiz attempt answers"
+on public.quiz_attempt_answers
+for delete
+to authenticated
+using (
+  exists (
+    select 1
+    from public.quiz_attempts
+    join public.quiz_templates
+      on quiz_templates.id = quiz_attempts.quiz_template_id
+    where quiz_attempts.id = quiz_attempt_answers.quiz_attempt_id
+      and quiz_templates.owner_user_id = auth.uid()
+  )
+);

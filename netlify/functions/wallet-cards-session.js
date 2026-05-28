@@ -14,6 +14,14 @@ const backTemplatePath = path.resolve(
   process.cwd(),
   'server/templates/cards/4.png'
 );
+const bowmanFrontTemplatePath = path.resolve(
+  process.cwd(),
+  'server/templates/cards/BowmanFront.png'
+);
+const bowmanBackTemplatePath = path.resolve(
+  process.cwd(),
+  'server/templates/cards/BowmanBack.png'
+);
 const CARD_FONT_PATHS = {
   oswaldBold: path.resolve(
     process.cwd(),
@@ -301,6 +309,74 @@ const CARD_LAYOUT = {
     },
   },
 };
+const BOWMAN_CARD_LAYOUT = {
+  front: {
+    studentName: {
+      x: 0,
+      y: 242,
+      width: 1050,
+      fontSize: 60.4,
+      minFontSize: 44,
+      align: 'center',
+      color: '#000000',
+      font: CARD_FONTS.oswaldBold,
+      lineHeight: 1,
+    },
+    courseName: {
+      x: 70,
+      y: 348,
+      width: 910,
+      fontSize: 52.4,
+      minFontSize: 36,
+      align: 'center',
+      color: '#00195f',
+      font: CARD_FONTS.oswaldBold,
+      lineHeight: 1,
+    },
+  },
+  back: {
+    textColor: '#00195f',
+    instructorName: {
+      x: 164,
+      y: 333,
+      width: 320,
+      fontSize: 32.4,
+      minFontSize: 24,
+      align: 'left',
+      color: '#00195f',
+      font: CARD_FONTS.oswaldBold,
+      lineHeight: 1,
+    },
+    signatureImage: {
+      x: 725,
+      y: 334,
+      width: 160,
+      height: 52,
+    },
+    dateIssued: {
+      x: 164,
+      y: 499,
+      width: 230,
+      fontSize: 32.4,
+      minFontSize: 24,
+      align: 'left',
+      color: '#00195f',
+      font: CARD_FONTS.oswaldBold,
+      lineHeight: 1,
+    },
+    validThrough: {
+      x: 687,
+      y: 499,
+      width: 230,
+      fontSize: 32.4,
+      minFontSize: 24,
+      align: 'left',
+      color: '#00195f',
+      font: CARD_FONTS.oswaldBold,
+      lineHeight: 1,
+    },
+  },
+};
 
 function jsonResponse(statusCode, error) {
   return {
@@ -327,6 +403,56 @@ function getSupabaseClient() {
       autoRefreshToken: false,
     },
   });
+}
+
+function getSupabaseAuthClient(accessToken) {
+  const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const anonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !anonKey) {
+    return null;
+  }
+
+  return createClient(supabaseUrl, anonKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+  });
+}
+
+function hasImportedAsset(user, assetName) {
+  const importedAssets = user?.user_metadata?.imported_assets;
+
+  if (!importedAssets) return true;
+
+  return Boolean(importedAssets[assetName]);
+}
+
+async function downloadTemplateFile(supabase, filePath) {
+  const { data, error } = await supabase.storage
+    .from('instructor-templates')
+    .download(filePath);
+
+  if (error || !data) {
+    throw error || new Error('Template file could not be loaded.');
+  }
+
+  return Buffer.from(await data.arrayBuffer());
+}
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function formatDate(value) {
@@ -422,13 +548,73 @@ function getUniquePdfName(studentName, usedNames, side) {
   return fileName;
 }
 
-async function loadCardTemplates() {
+async function loadCardTemplates(supabase, user) {
+  const customTemplates = user?.user_metadata?.custom_templates?.walletCards;
+  const templateDesigns = user?.user_metadata?.template_designs || {};
+  const walletCardDesign =
+    templateDesigns.walletCardDesign === 'bowman' ? 'bowman' : 'excourse';
+  const legacyWalletDesign =
+    templateDesigns.walletCards === 'different' ? 'different' : 'same';
+  const useCustomFront =
+    (templateDesigns.walletFront || legacyWalletDesign) === 'different' &&
+    customTemplates?.front?.path;
+  const useCustomBack =
+    (templateDesigns.walletBack || legacyWalletDesign) === 'different' &&
+    customTemplates?.back?.path;
+
+  if (useCustomFront || useCustomBack) {
+    if (
+      (useCustomFront && customTemplates.front.extension === 'pdf') ||
+      (useCustomBack && customTemplates.back.extension === 'pdf')
+    ) {
+      throw new Error(
+        'Custom PDF wallet card templates are uploaded, but PDF background rendering is not enabled yet. Use PNG or JPG images for generated wallet cards.'
+      );
+    }
+
+    const [front, back] = await Promise.all([
+      useCustomFront
+        ? downloadTemplateFile(supabase, customTemplates.front.path)
+        : fs.readFile(frontTemplatePath),
+      useCustomBack
+        ? downloadTemplateFile(supabase, customTemplates.back.path)
+        : fs.readFile(backTemplatePath),
+    ]);
+
+    return {
+      front,
+      back,
+      customFront: Boolean(useCustomFront),
+      customBack: Boolean(useCustomBack),
+      design: walletCardDesign === 'bowman' ? 'bowman' : 'custom',
+    };
+  }
+
+  const hasBuiltInBowmanTemplates =
+    (await fileExists(bowmanFrontTemplatePath)) &&
+    (await fileExists(bowmanBackTemplatePath));
+
+  if (walletCardDesign === 'bowman' && hasBuiltInBowmanTemplates) {
+    const [front, back] = await Promise.all([
+      fs.readFile(bowmanFrontTemplatePath),
+      fs.readFile(bowmanBackTemplatePath),
+    ]);
+
+    return {
+      front,
+      back,
+      customFront: true,
+      customBack: true,
+      design: 'bowman',
+    };
+  }
+
   const [front, back] = await Promise.all([
     fs.readFile(frontTemplatePath),
     fs.readFile(backTemplatePath),
   ]);
 
-  return { front, back };
+  return { front, back, customFront: false, customBack: false, design: 'default' };
 }
 
 function registerCardFonts(doc) {
@@ -845,6 +1031,7 @@ function getWalletCardData(session, record) {
   const completedDate = formatDate(session.training_date);
   const validThrough = formatDate(addYearsToDate(session.training_date, 3));
   const instructorName = toCardDisplayText(session.trainer_name, 'N/A');
+  const instructorNameTitle = formatStudentName(session.trainer_name || 'N/A');
 
   return {
     studentName,
@@ -852,7 +1039,28 @@ function getWalletCardData(session, record) {
     completedDate,
     validThrough,
     instructorName,
+    instructorNameTitle,
   };
+}
+
+function drawBowmanFrontFields(doc, data) {
+  drawText(doc, data.studentName, BOWMAN_CARD_LAYOUT.front.studentName);
+  drawText(doc, data.courseName, BOWMAN_CARD_LAYOUT.front.courseName);
+}
+
+function drawBowmanBackFields(doc, data, signatureImage) {
+  drawText(
+    doc,
+    data.instructorNameTitle,
+    BOWMAN_CARD_LAYOUT.back.instructorName
+  );
+  drawSignatureImage(
+    doc,
+    signatureImage,
+    BOWMAN_CARD_LAYOUT.back.signatureImage
+  );
+  drawText(doc, data.completedDate, BOWMAN_CARD_LAYOUT.back.dateIssued);
+  drawText(doc, data.validThrough, BOWMAN_CARD_LAYOUT.back.validThrough);
 }
 
 function createWalletCardPdfBuffer(session, record, templates, side, signatureImage) {
@@ -862,13 +1070,14 @@ function createWalletCardPdfBuffer(session, record, templates, side, signatureIm
       margin: 0,
     });
     const chunks = [];
+    const data = getWalletCardData(session, record);
     const {
       studentName,
       courseName,
       completedDate,
       validThrough,
       instructorName,
-    } = getWalletCardData(session, record);
+    } = data;
 
     doc.on('data', (chunk) => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
@@ -881,42 +1090,56 @@ function createWalletCardPdfBuffer(session, record, templates, side, signatureIm
         height: PAGE_SIZE[1],
       });
 
-      drawFrontCardShell(doc, templates.front);
-      drawText(doc, studentName, CARD_LAYOUT.front.studentName);
-      drawText(doc, courseName, CARD_LAYOUT.front.courseName);
-      drawText(doc, 'COMPLETED', CARD_LAYOUT.front.completedLabel);
-      drawText(doc, completedDate, CARD_LAYOUT.front.completedDate);
-      drawText(doc, 'VALID THROUGH', CARD_LAYOUT.front.validThroughLabel);
-      drawText(doc, validThrough, CARD_LAYOUT.front.validThrough);
+      if (templates.design === 'bowman') {
+        drawBowmanFrontFields(doc, data);
+      } else {
+        if (!templates.customFront) {
+          drawFrontCardShell(doc, templates.front);
+        }
+
+        drawText(doc, studentName, CARD_LAYOUT.front.studentName);
+        drawText(doc, courseName, CARD_LAYOUT.front.courseName);
+        drawText(doc, 'COMPLETED', CARD_LAYOUT.front.completedLabel);
+        drawText(doc, completedDate, CARD_LAYOUT.front.completedDate);
+        drawText(doc, 'VALID THROUGH', CARD_LAYOUT.front.validThroughLabel);
+        drawText(doc, validThrough, CARD_LAYOUT.front.validThrough);
+      }
     } else {
       doc.image(templates.back, 0, 0, {
         width: PAGE_SIZE[0],
         height: PAGE_SIZE[1],
       });
 
-      drawBackCardShell(doc);
-      drawText(doc, courseName, CARD_LAYOUT.back.courseName);
-      drawText(doc, instructorName, CARD_LAYOUT.back.instructor);
-      drawText(
-        doc,
-        'INSTRUCTOR CERTIFICATION',
-        CARD_LAYOUT.back.instructorCertification
-      );
-      drawSignatureImage(
-        doc,
-        signatureImage,
-        CARD_LAYOUT.back.shell.signatureImage
-      );
-      drawText(doc, completedDate, CARD_LAYOUT.back.dateIssued);
-      drawText(doc, validThrough, CARD_LAYOUT.back.validThrough);
+      if (templates.design === 'bowman') {
+        drawBowmanBackFields(doc, data, signatureImage);
+      } else {
+        if (!templates.customBack) {
+          drawBackCardShell(doc);
+        }
+
+        drawText(doc, courseName, CARD_LAYOUT.back.courseName);
+        drawText(doc, instructorName, CARD_LAYOUT.back.instructor);
+        drawText(
+          doc,
+          'INSTRUCTOR CERTIFICATION',
+          CARD_LAYOUT.back.instructorCertification
+        );
+        drawSignatureImage(
+          doc,
+          signatureImage,
+          CARD_LAYOUT.back.shell.signatureImage
+        );
+        drawText(doc, completedDate, CARD_LAYOUT.back.dateIssued);
+        drawText(doc, validThrough, CARD_LAYOUT.back.validThrough);
+      }
     }
 
     doc.end();
   });
 }
 
-async function generateWalletCardPdfs(session, records, supabase) {
-  const templates = await loadCardTemplates();
+async function generateWalletCardPdfs(session, records, supabase, user) {
+  const templates = await loadCardTemplates(supabase, user);
   const usedNames = new Set();
   const pdfFiles = [];
   const trainerSignatureImage = await fetchSignatureImage(
@@ -970,18 +1193,35 @@ export async function handler(event) {
   }
 
   const sessionId = event.queryStringParameters?.sessionId;
+  const authHeader = event.headers.authorization || event.headers.Authorization || '';
+  const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
 
   if (!sessionId) {
     return jsonResponse(400, 'Missing session ID.');
   }
 
+  if (!accessToken) {
+    return jsonResponse(401, 'Login required.');
+  }
+
+  const authClient = getSupabaseAuthClient(accessToken);
   const supabase = getSupabaseClient();
 
-  if (!supabase) {
+  if (!authClient || !supabase) {
     return jsonResponse(500, 'Server is missing Supabase configuration.');
   }
 
   try {
+    const { data: userData, error: userError } = await authClient.auth.getUser(accessToken);
+
+    if (userError || !userData?.user) {
+      return jsonResponse(401, 'Login required.');
+    }
+
+    if (!hasImportedAsset(userData.user, 'walletCards')) {
+      return jsonResponse(403, 'Wallet card access was not included for this email.');
+    }
+
     const sessionResult = await supabase
       .from('training_sessions')
       .select('*')
@@ -994,6 +1234,10 @@ export async function handler(event) {
 
     if (!sessionResult.data) {
       return jsonResponse(404, 'Training session not found.');
+    }
+
+    if (sessionResult.data.owner_user_id !== userData.user.id) {
+      return jsonResponse(403, 'You do not have access to this training session.');
     }
 
     const recordsResult = await supabase
@@ -1015,7 +1259,8 @@ export async function handler(event) {
     const pdfFiles = await generateWalletCardPdfs(
       sessionResult.data,
       records,
-      supabase
+      supabase,
+      userData.user
     );
     const zipBuffer = await zipFiles(pdfFiles);
     const zipName = `${cleanFileName(

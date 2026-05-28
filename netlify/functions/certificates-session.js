@@ -88,6 +88,47 @@ function getSupabaseClient() {
   });
 }
 
+function getSupabaseAuthClient(accessToken) {
+  const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const anonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !anonKey) {
+    return null;
+  }
+
+  return createClient(supabaseUrl, anonKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+  });
+}
+
+function hasImportedAsset(user, assetName) {
+  const importedAssets = user?.user_metadata?.imported_assets;
+
+  if (!importedAssets) return true;
+
+  return Boolean(importedAssets[assetName]);
+}
+
+async function downloadTemplateFile(supabase, filePath) {
+  const { data, error } = await supabase.storage
+    .from('instructor-templates')
+    .download(filePath);
+
+  if (error || !data) {
+    throw error || new Error('Template file could not be loaded.');
+  }
+
+  return Buffer.from(await data.arrayBuffer());
+}
+
 function formatDate(value) {
   if (!value) return 'N/A';
 
@@ -158,7 +199,27 @@ function getTemplateData(session, record) {
   };
 }
 
-async function loadCertificateTemplate() {
+async function loadCertificateTemplate(supabase, user) {
+  const customTemplate = user?.user_metadata?.custom_templates?.certificateTemplate;
+
+  if (customTemplate?.path) {
+    if (customTemplate.extension === 'pdf') {
+      throw new Error(
+        'Custom PDF certificate templates are uploaded, but PDF background rendering is not enabled yet. Use a DOCX template for generated certificates.'
+      );
+    }
+
+    const templateBuffer = await downloadTemplateFile(supabase, customTemplate.path);
+    const zip = new PizZip(templateBuffer);
+    const background = zip.file('word/media/image1.png')?.asNodeBuffer();
+
+    if (!background) {
+      throw new Error('Custom certificate template background image is missing.');
+    }
+
+    return { background };
+  }
+
   const templateBuffer = await fs.readFile(templatePath);
   const zip = new PizZip(templateBuffer);
   const background = zip.file('word/media/image1.png')?.asNodeBuffer();
@@ -550,8 +611,8 @@ function createCertificatePdfBuffer(data, template, signatureImage) {
   });
 }
 
-async function generateCertificatePdfs(session, records, supabase) {
-  const template = await loadCertificateTemplate();
+async function generateCertificatePdfs(session, records, supabase, user) {
+  const template = await loadCertificateTemplate(supabase, user);
   const usedNames = new Set();
   const pdfFiles = [];
   const trainerSignatureImage = await fetchSignatureImage(
@@ -592,18 +653,35 @@ export async function handler(event) {
   }
 
   const sessionId = event.queryStringParameters?.sessionId;
+  const authHeader = event.headers.authorization || event.headers.Authorization || '';
+  const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
 
   if (!sessionId) {
     return jsonResponse(400, 'Missing session ID.');
   }
 
+  if (!accessToken) {
+    return jsonResponse(401, 'Login required.');
+  }
+
+  const authClient = getSupabaseAuthClient(accessToken);
   const supabase = getSupabaseClient();
 
-  if (!supabase) {
+  if (!authClient || !supabase) {
     return jsonResponse(500, 'Server is missing Supabase configuration.');
   }
 
   try {
+    const { data: userData, error: userError } = await authClient.auth.getUser(accessToken);
+
+    if (userError || !userData?.user) {
+      return jsonResponse(401, 'Login required.');
+    }
+
+    if (!hasImportedAsset(userData.user, 'certificateTemplate')) {
+      return jsonResponse(403, 'Certificate template access was not included for this email.');
+    }
+
     const sessionResult = await supabase
       .from('training_sessions')
       .select('*')
@@ -616,6 +694,10 @@ export async function handler(event) {
 
     if (!sessionResult.data) {
       return jsonResponse(404, 'Training session not found.');
+    }
+
+    if (sessionResult.data.owner_user_id !== userData.user.id) {
+      return jsonResponse(403, 'You do not have access to this training session.');
     }
 
     const recordsResult = await supabase
@@ -637,7 +719,8 @@ export async function handler(event) {
     const pdfFiles = await generateCertificatePdfs(
       sessionResult.data,
       records,
-      supabase
+      supabase,
+      userData.user
     );
     const zipBuffer = await zipFiles(pdfFiles);
     const zipName = `${cleanFileName(

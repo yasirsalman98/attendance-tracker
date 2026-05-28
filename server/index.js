@@ -10,6 +10,11 @@ import zlib from 'node:zlib';
 import PDFDocument from 'pdfkit';
 import PizZip from 'pizzip';
 import JSZip from 'jszip';
+import { handler as instructorUsersHandler } from '../netlify/functions/instructor-users.js';
+import { handler as attendanceRecordsHandler } from '../netlify/functions/attendance-records.js';
+import { handler as certificatesSessionHandler } from '../netlify/functions/certificates-session.js';
+import { handler as savedQuizLibraryHandler } from '../netlify/functions/saved-quiz-library.js';
+import { handler as walletCardsSessionHandler } from '../netlify/functions/wallet-cards-session.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3001);
@@ -26,8 +31,8 @@ app.use((request, response, next) => {
     response.setHeader('Vary', 'Origin');
   }
 
-  response.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  response.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   response.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
 
   if (request.method === 'OPTIONS') {
@@ -37,6 +42,8 @@ app.use((request, response, next) => {
 
   next();
 });
+
+app.use(express.json({ limit: '25mb' }));
 
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 const supabaseServerKey =
@@ -1306,6 +1313,83 @@ async function sendZipBufferResponse(response, files, fileName) {
   response.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
   response.send(zipBuffer);
 }
+
+async function runLocalNetlifyFunction(request, response, handler) {
+  const result = await handler({
+    httpMethod: request.method,
+    headers: request.headers,
+    body:
+      request.method === 'GET' || request.method === 'HEAD'
+        ? ''
+        : JSON.stringify(request.body || {}),
+    queryStringParameters: request.query || {},
+  });
+
+  Object.entries(result.headers || {}).forEach(([headerName, headerValue]) => {
+    response.setHeader(headerName, headerValue);
+  });
+
+  const responseBody = result.isBase64Encoded
+    ? Buffer.from(result.body || '', 'base64')
+    : result.body || '';
+
+  response.status(result.statusCode || 200).send(responseBody);
+}
+
+app.all('/.netlify/functions/instructor-users', async (request, response) => {
+  try {
+    await runLocalNetlifyFunction(request, response, instructorUsersHandler);
+  } catch (error) {
+    console.error('Local instructor-users function error:', error);
+    response.status(500).json({
+      error: error?.message || 'Unable to run instructor users function locally.',
+    });
+  }
+});
+
+app.all('/.netlify/functions/attendance-records', async (request, response) => {
+  try {
+    await runLocalNetlifyFunction(request, response, attendanceRecordsHandler);
+  } catch (error) {
+    console.error('Local attendance-records function error:', error);
+    response.status(500).json({
+      error: error?.message || 'Unable to run attendance records function locally.',
+    });
+  }
+});
+
+app.all('/.netlify/functions/certificates-session', async (request, response) => {
+  try {
+    await runLocalNetlifyFunction(request, response, certificatesSessionHandler);
+  } catch (error) {
+    console.error('Local certificates-session function error:', error);
+    response.status(500).json({
+      error: error?.message || 'Unable to run certificates function locally.',
+    });
+  }
+});
+
+app.all('/.netlify/functions/wallet-cards-session', async (request, response) => {
+  try {
+    await runLocalNetlifyFunction(request, response, walletCardsSessionHandler);
+  } catch (error) {
+    console.error('Local wallet-cards-session function error:', error);
+    response.status(500).json({
+      error: error?.message || 'Unable to run wallet cards function locally.',
+    });
+  }
+});
+
+app.all('/.netlify/functions/saved-quiz-library', async (request, response) => {
+  try {
+    await runLocalNetlifyFunction(request, response, savedQuizLibraryHandler);
+  } catch (error) {
+    console.error('Local saved-quiz-library function error:', error);
+    response.status(500).json({
+      error: error?.message || 'Unable to run saved quiz library function locally.',
+    });
+  }
+});
 
 app.post('/api/certificates/session/:sessionId', async (request, response) => {
   const supabase = getSupabaseClient();

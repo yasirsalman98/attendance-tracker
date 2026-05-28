@@ -283,12 +283,18 @@ export default function CreateTrainingSession() {
     setSubmitting(true);
 
     try {
+      const { data: userData, error: userError } = await supabase.auth.getUser();
+
+      if (userError || !userData?.user?.id) {
+        throw new Error('Please sign in again before creating a session.');
+      }
+
       let trainerSignaturePath = null;
 
       const trainerSignatureBlob = dataUrlToBlob(acceptedTrainerSignatureDataUrl);
       const fileName = `${Date.now()}-${crypto.randomUUID()}.png`;
 
-      trainerSignaturePath = `trainer-signatures/${fileName}`;
+      trainerSignaturePath = `${userData.user.id}/trainer-signatures/${fileName}`;
 
       const uploadResult = await supabase.storage
         .from('signatures')
@@ -298,7 +304,9 @@ export default function CreateTrainingSession() {
         });
 
       if (uploadResult.error) {
-        throw uploadResult.error;
+        throw new Error(
+          `Unable to upload trainer signature: ${uploadResult.error.message}`
+        );
       }
 
       const { data, error } = await supabase
@@ -314,12 +322,13 @@ export default function CreateTrainingSession() {
           trainer_name: cleanTrainerName,
           trainer_signature_path: trainerSignaturePath,
           course_outline: cleanCourseOutline || null,
+          owner_user_id: userData.user.id,
         })
         .select()
         .single();
 
       if (error) {
-        throw error;
+        throw new Error(`Unable to save training session: ${error.message}`);
       }
 
       setCreatedSession(data);

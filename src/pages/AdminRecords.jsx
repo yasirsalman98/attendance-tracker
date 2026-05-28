@@ -4,6 +4,24 @@ import autoTable from 'jspdf-autotable';
 import ExcelJS from 'exceljs';
 import { supabase } from '../supabaseClient';
 
+const SHAREPOINT_ARCHIVE_EMAIL = 'excourse7233@gmail.com';
+
+function getAssetAccessFromUser(user) {
+  const importedAssets = user?.user_metadata?.imported_assets;
+
+  if (!importedAssets) {
+    return {
+      certificateTemplate: true,
+      walletCards: true,
+    };
+  }
+
+  return {
+    certificateTemplate: Boolean(importedAssets.certificateTemplate),
+    walletCards: Boolean(importedAssets.walletCards),
+  };
+}
+
 function formatDateTime(value) {
   if (!value) return 'N/A';
 
@@ -54,15 +72,33 @@ function getDownloadFileName(contentDisposition, fallbackName) {
   return match?.[1] || fallbackName;
 }
 
-function isMissingStorageObjectError(error) {
-  const message = String(error?.message || '').toLowerCase();
-  const statusCode = String(error?.statusCode || error?.status || '');
+async function assertValidZipBlob(blob, label) {
+  const header = new Uint8Array(await blob.slice(0, 2).arrayBuffer());
 
-  return (
-    statusCode === '404' ||
-    message.includes('not found') ||
-    message.includes('does not exist')
+  if (header[0] === 0x50 && header[1] === 0x4b) {
+    return;
+  }
+
+  throw new Error(
+    `${label} download did not return a valid ZIP file. Please try again.`
   );
+}
+
+async function downloadZipResponse(response, fallbackFileName, label) {
+  const blob = await response.blob();
+
+  await assertValidZipBlob(blob, label);
+
+  const url = window.URL.createObjectURL(blob);
+  const contentDisposition = response.headers.get('Content-Disposition');
+  const link = document.createElement('a');
+
+  link.href = url;
+  link.download = getDownloadFileName(contentDisposition, fallbackFileName);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
 }
 
 function cleanFileName(value, fallback = 'student-photo') {
@@ -122,7 +158,7 @@ function isLocalHost() {
 
 function getCertificatesUrl(sessionId) {
   if (isLocalHost()) {
-    return `http://localhost:3001/api/certificates/session/${sessionId}`;
+    return `http://localhost:3001/.netlify/functions/certificates-session?sessionId=${sessionId}`;
   }
 
   return `/.netlify/functions/certificates-session?sessionId=${sessionId}`;
@@ -130,10 +166,18 @@ function getCertificatesUrl(sessionId) {
 
 function getWalletCardsUrl(sessionId) {
   if (isLocalHost()) {
-    return `http://localhost:3001/api/wallet-cards/session/${sessionId}`;
+    return `http://localhost:3001/.netlify/functions/wallet-cards-session?sessionId=${sessionId}`;
   }
 
   return `/.netlify/functions/wallet-cards-session?sessionId=${sessionId}`;
+}
+
+function getAttendanceRecordsUrl() {
+  if (isLocalHost()) {
+    return 'http://localhost:3001/.netlify/functions/attendance-records';
+  }
+
+  return '/.netlify/functions/attendance-records';
 }
 
 function blobToBase64(blob) {
@@ -164,6 +208,16 @@ async function uploadPdfToSharePoint(doc, fileName) {
   }
 
   return data;
+}
+
+async function getAccessToken() {
+  const { data, error } = await supabase.auth.getSession();
+
+  if (error || !data?.session?.access_token) {
+    throw new Error('Please sign in again.');
+  }
+
+  return data.session.access_token;
 }
 
 function groupRecordsBySession(records) {
@@ -414,6 +468,11 @@ function TrainerSignaturePreview({ session, onError }) {
 
 export default function AdminRecords() {
   const [records, setRecords] = useState([]);
+  const [currentUserEmail, setCurrentUserEmail] = useState('');
+  const [assetAccess, setAssetAccess] = useState({
+    certificateTemplate: true,
+    walletCards: true,
+  });
   const [status, setStatus] = useState('Loading records...');
   const [deletingId, setDeletingId] = useState(null);
   const [generatingCertificatesId, setGeneratingCertificatesId] = useState(null);
@@ -427,6 +486,8 @@ export default function AdminRecords() {
   const [expandedSessionIds, setExpandedSessionIds] = useState(() => new Set());
 
   const groupedRecords = useMemo(() => groupRecordsBySession(records), [records]);
+  const shouldArchiveToSharePoint =
+    currentUserEmail.trim().toLowerCase() === SHAREPOINT_ARCHIVE_EMAIL;
   const handleMediaLoadError = useCallback((message) => {
     setPhotoModalError(message);
     setStatus(message);
@@ -500,6 +561,10 @@ export default function AdminRecords() {
 
     const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
     const accessToken = sessionData?.session?.access_token;
+    const userEmail = sessionData?.session?.user?.email || '';
+
+    setCurrentUserEmail(userEmail.trim().toLowerCase());
+    setAssetAccess(getAssetAccessFromUser(sessionData?.session?.user));
 
     if (sessionError || !accessToken) {
       console.error('Attendance records auth error:', sessionError);
@@ -508,7 +573,7 @@ export default function AdminRecords() {
     }
 
     try {
-      const response = await fetch('/.netlify/functions/attendance-records', {
+      const response = await fetch(getAttendanceRecordsUrl(), {
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
@@ -556,6 +621,7 @@ export default function AdminRecords() {
     }
 
     const loadedRecords = result.data || [];
+
     const sessionIds = getUniqueSessionIds(loadedRecords);
     const recordsMissingSessions = loadedRecords.some(
       (record) => record.training_session_id && !record.training_sessions
@@ -583,18 +649,6 @@ export default function AdminRecords() {
     setStatus('');
   }
 
-  async function deleteStorageFile(bucketName, filePath) {
-    if (!filePath) return;
-
-    const { error } = await supabase.storage
-      .from(bucketName)
-      .remove([filePath]);
-
-    if (error && !isMissingStorageObjectError(error)) {
-      throw error;
-    }
-  }
-
   async function deleteRecord(record) {
     const confirmed = window.confirm(
       `Delete attendance record for ${record.student_name}? This cannot be undone.`
@@ -608,23 +662,30 @@ export default function AdminRecords() {
     setStatus('');
 
     try {
-      await deleteStorageFile('signatures', record.signature_path);
-      await deleteStorageFile('attendance-photos', record.photo_path);
+      const accessToken = await getAccessToken();
+      const response = await fetch(getAttendanceRecordsUrl(), {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ recordId: record.id }),
+      });
+      const data = await response.json().catch(() => null);
 
-      const deleteResult = await supabase
-        .from('attendance_records')
-        .delete()
-        .eq('id', record.id);
-
-      if (deleteResult.error) {
-        throw deleteResult.error;
+      if (!response.ok) {
+        throw new Error(data?.error || 'Failed to delete record.');
       }
 
       setRecords((currentRecords) =>
         currentRecords.filter((currentRecord) => currentRecord.id !== record.id)
       );
 
-      setStatus('Record and uploaded files deleted successfully.');
+      setStatus(
+        data?.deletedSession
+          ? 'Last student deleted. The class and uploaded files were deleted too.'
+          : 'Record and uploaded files deleted successfully.'
+      );
     } catch (error) {
       console.error(error);
       setStatus(error.message || 'Failed to delete record and uploaded files.');
@@ -636,6 +697,11 @@ export default function AdminRecords() {
   async function downloadSessionCertificates(group) {
     if (group.id === 'unassigned') return;
 
+    if (!assetAccess.certificateTemplate) {
+      setStatus('Certificate downloads were not included for this email.');
+      return;
+    }
+
     if (group.records.length === 0) {
       setStatus('No students found for this session.');
       return;
@@ -645,8 +711,12 @@ export default function AdminRecords() {
     setGeneratingCertificatesId(group.id);
 
     try {
+      const accessToken = await getAccessToken();
       const response = await fetch(getCertificatesUrl(group.id), {
         method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
       });
 
       if (!response.ok) {
@@ -657,28 +727,17 @@ export default function AdminRecords() {
 
         throw new Error(
           errorData?.error ||
-            'Certificate download failed. Please check Netlify function logs.'
+            'Certificates could not be downloaded for this email.'
         );
       }
 
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const contentDisposition = response.headers.get('Content-Disposition');
-      const fallbackFileName = 'certificates.zip';
-      const link = document.createElement('a');
-
-      link.href = url;
-      link.download = getDownloadFileName(contentDisposition, fallbackFileName);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
+      await downloadZipResponse(response, 'certificates.zip', 'Certificate');
     } catch (error) {
       console.error(error);
       const message =
         error instanceof TypeError
-          ? 'Certificate download failed. Please check Netlify function logs.'
-          : error.message || 'Failed to generate certificates.';
+          ? 'Certificates could not be downloaded. Please try again.'
+          : error.message || 'Certificates could not be downloaded.';
 
       setStatus(message);
     } finally {
@@ -689,6 +748,11 @@ export default function AdminRecords() {
   async function downloadSessionWalletCards(group) {
     if (group.id === 'unassigned') return;
 
+    if (!assetAccess.walletCards) {
+      setStatus('Wallet card downloads were not included for this email.');
+      return;
+    }
+
     if (group.records.length === 0) {
       setStatus('No students found for this session.');
       return;
@@ -698,8 +762,12 @@ export default function AdminRecords() {
     setGeneratingWalletCardsId(group.id);
 
     try {
+      const accessToken = await getAccessToken();
       const response = await fetch(getWalletCardsUrl(group.id), {
         method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
       });
 
       if (!response.ok) {
@@ -710,28 +778,17 @@ export default function AdminRecords() {
 
         throw new Error(
           errorData?.error ||
-            'Wallet card download failed. Please check Netlify function logs.'
+            'Wallet cards could not be downloaded for this email.'
         );
       }
 
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const contentDisposition = response.headers.get('Content-Disposition');
-      const fallbackFileName = 'wallet-cards.zip';
-      const link = document.createElement('a');
-
-      link.href = url;
-      link.download = getDownloadFileName(contentDisposition, fallbackFileName);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
+      await downloadZipResponse(response, 'wallet-cards.zip', 'Wallet cards');
     } catch (error) {
       console.error(error);
       const message =
         error instanceof TypeError
-          ? 'Wallet card download failed. Please check Netlify function logs.'
-          : error.message || 'Failed to generate wallet cards.';
+          ? 'Wallet cards could not be downloaded. Please try again.'
+          : error.message || 'Wallet cards could not be downloaded.';
 
       setStatus(message);
     } finally {
@@ -741,21 +798,6 @@ export default function AdminRecords() {
 
   async function downloadArchiveImage(bucketName, filePath, fallbackUrl) {
     try {
-      if (filePath) {
-        const { data, error } = await supabase.storage
-          .from(bucketName)
-          .download(filePath);
-
-        if (!error && data) {
-          return await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = reject;
-            reader.readAsDataURL(data);
-          });
-        }
-      }
-
       if (fallbackUrl) {
         const response = await fetch(fallbackUrl);
 
@@ -767,6 +809,21 @@ export default function AdminRecords() {
             reader.onload = () => resolve(reader.result);
             reader.onerror = reject;
             reader.readAsDataURL(blob);
+          });
+        }
+      }
+
+      if (filePath) {
+        const { data, error } = await supabase.storage
+          .from(bucketName)
+          .download(filePath);
+
+        if (!error && data) {
+          return await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(data);
           });
         }
       }
@@ -802,7 +859,8 @@ export default function AdminRecords() {
       for (const record of group.records) {
         const photoImage = await downloadArchiveImage(
           'attendance-photos',
-          record.photo_path
+          record.photo_path,
+          record.photo_url
         );
         const signatureImage = await downloadArchiveImage(
           'signatures',
@@ -943,12 +1001,16 @@ export default function AdminRecords() {
 
       const fileName = getClassArchivePdfFileName(session);
 
-      try {
-        await uploadPdfToSharePoint(doc, fileName);
-        alert('Class PDF archived to SharePoint.');
-      } catch (error) {
-        console.error(error);
-        alert('SharePoint upload failed. The PDF will download instead.');
+      if (shouldArchiveToSharePoint) {
+        try {
+          await uploadPdfToSharePoint(doc, fileName);
+          alert('Class PDF archived to SharePoint.');
+        } catch (error) {
+          console.error(error);
+          alert('SharePoint upload failed. The PDF will download instead.');
+          doc.save(fileName);
+        }
+      } else {
         doc.save(fileName);
       }
     } catch (error) {
@@ -1024,7 +1086,8 @@ export default function AdminRecords() {
       for (const record of group.records) {
         const photoImage = await downloadArchiveImage(
           'attendance-photos',
-          record.photo_path
+          record.photo_path,
+          record.photo_url
         );
         const signatureImage = await downloadArchiveImage(
           'signatures',
@@ -1103,6 +1166,8 @@ export default function AdminRecords() {
     }, 0);
 
     return () => window.clearTimeout(timerId);
+    // Admin records intentionally load once when the page opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -1124,7 +1189,7 @@ export default function AdminRecords() {
         <p className="status">{status || photoModalError}</p>
       )}
 
-      {!status && records.length === 0 && (
+      {!status && groupedRecords.length === 0 && (
         <p className="muted">No attendance records found yet.</p>
       )}
 
@@ -1163,8 +1228,14 @@ export default function AdminRecords() {
                         className="secondary-button session-action-button"
                         onClick={() => downloadSessionCertificates(group)}
                         disabled={
+                          !assetAccess.certificateTemplate ||
                           group.records.length === 0 ||
                           generatingCertificatesId === group.id
+                        }
+                        title={
+                          assetAccess.certificateTemplate
+                            ? ''
+                            : 'Certificate downloads were not included for this email.'
                         }
                       >
                         {generatingCertificatesId === group.id
@@ -1177,8 +1248,14 @@ export default function AdminRecords() {
                         className="secondary-button session-action-button"
                         onClick={() => downloadSessionWalletCards(group)}
                         disabled={
+                          !assetAccess.walletCards ||
                           group.records.length === 0 ||
                           generatingWalletCardsId === group.id
+                        }
+                        title={
+                          assetAccess.walletCards
+                            ? ''
+                            : 'Wallet card downloads were not included for this email.'
                         }
                       >
                         {generatingWalletCardsId === group.id

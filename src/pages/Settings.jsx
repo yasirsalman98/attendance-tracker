@@ -1,0 +1,1116 @@
+import { useEffect, useState } from 'react';
+import { supabase } from '../supabaseClient';
+import './Quiz.css';
+
+function fileToTemplateUpload(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      resolve(null);
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      resolve({
+        base64: result.includes(',') ? result.split(',').pop() : result,
+        fileName: file.name,
+        mimeType: file.type || 'application/octet-stream',
+      });
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatDateTime(value) {
+  if (!value) return 'Never';
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Never';
+
+  return date.toLocaleString();
+}
+
+async function readFunctionResponse(response, fallbackMessage) {
+  const responseText = await response.text();
+  let data = null;
+  const readableResponseText =
+    responseText && responseText.trim().startsWith('<')
+      ? `${fallbackMessage} (${response.status} ${response.statusText})`
+      : responseText;
+
+  if (responseText) {
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      data = null;
+    }
+  }
+
+  if (!response.ok) {
+    const errorMessage =
+      data?.error ||
+      readableResponseText ||
+      `${fallbackMessage} (${response.status} ${response.statusText})`;
+
+    throw new Error(errorMessage);
+  }
+
+  return data;
+}
+
+function UploadPreview({ file }) {
+  const [previewUrl, setPreviewUrl] = useState('');
+
+  useEffect(() => {
+    if (!file || !file.type.startsWith('image/')) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPreviewUrl('');
+      return undefined;
+    }
+
+    const nextPreviewUrl = URL.createObjectURL(file);
+    setPreviewUrl(nextPreviewUrl);
+
+    return () => URL.revokeObjectURL(nextPreviewUrl);
+  }, [file]);
+
+  if (!file) return null;
+
+  if (!previewUrl) {
+    return <span className="settings-file-note">{file.name}</span>;
+  }
+
+  return (
+    <div className="settings-upload-preview">
+      <img src={previewUrl} alt={`${file.name} preview`} />
+      <span>{file.name}</span>
+    </div>
+  );
+}
+
+export default function Settings() {
+  const [users, setUsers] = useState([]);
+  const [newEmail, setNewEmail] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [pendingAddUser, setPendingAddUser] = useState(null);
+  const [importOptions, setImportOptions] = useState({
+    none: true,
+    walletCards: false,
+    certificateTemplate: false,
+    quizzes: false,
+  });
+  const [templateDesigns, setTemplateDesigns] = useState({
+    walletFront: 'same',
+    walletBack: 'same',
+    certificateTemplate: 'same',
+  });
+  const [templateFiles, setTemplateFiles] = useState({
+    certificateTemplate: null,
+    walletFront: null,
+    walletBack: null,
+  });
+  const [currentUserId, setCurrentUserId] = useState('');
+  const [status, setStatus] = useState('Loading emails...');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [isAdding, setIsAdding] = useState(false);
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
+  const [resettingUserId, setResettingUserId] = useState('');
+  const [resetTargetUser, setResetTargetUser] = useState(null);
+  const [resetPasswordValue, setResetPasswordValue] = useState('');
+  const [resetPasswordError, setResetPasswordError] = useState('');
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [deletingUserId, setDeletingUserId] = useState('');
+  const [deleteTargetUser, setDeleteTargetUser] = useState(null);
+  const [featureTargetUser, setFeatureTargetUser] = useState(null);
+  const [featureOptions, setFeatureOptions] = useState({
+    walletCards: false,
+    certificateTemplate: false,
+    quizzes: false,
+  });
+  const [featureTemplateDesigns, setFeatureTemplateDesigns] = useState({
+    walletCardDesign: 'excourse',
+    walletFront: 'same',
+    walletBack: 'same',
+    certificateTemplate: 'same',
+    certificateDesign: 'excourse',
+  });
+  const [isUpdatingFeatures, setIsUpdatingFeatures] = useState(false);
+
+  async function getAccessToken() {
+    const { data, error } = await supabase.auth.getSession();
+
+    if (error || !data?.session?.access_token) {
+      throw new Error('Please sign in again.');
+    }
+
+    setCurrentUserId(data.session.user.id);
+    return data.session.access_token;
+  }
+
+  async function loadUsers() {
+    setErrorMessage('');
+    setStatus('Loading emails...');
+
+    try {
+      const accessToken = await getAccessToken();
+      const response = await fetch('/.netlify/functions/instructor-users', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      const data = await readFunctionResponse(response, 'Unable to load emails.');
+
+      setUsers(data?.users || []);
+      setStatus(data?.users?.length ? '' : 'No emails found.');
+    } catch (error) {
+      console.error('Load instructor users error:', error);
+      setUsers([]);
+      setStatus('');
+      setErrorMessage(error?.message || 'Unable to load emails.');
+    }
+  }
+
+  async function addUser(event) {
+    event.preventDefault();
+
+    const cleanEmail = newEmail.trim().toLowerCase();
+
+    if (!cleanEmail) {
+      setErrorMessage('Email is required.');
+      return;
+    }
+
+    if (newPassword.length < 6) {
+      setErrorMessage('Password must be at least 6 characters.');
+      return;
+    }
+
+    setPendingAddUser({ email: cleanEmail, password: newPassword });
+    setImportOptions({
+      none: true,
+      walletCards: false,
+      certificateTemplate: false,
+      quizzes: false,
+    });
+    setTemplateDesigns({
+      walletFront: 'same',
+      walletBack: 'same',
+      certificateTemplate: 'same',
+    });
+    setTemplateFiles({
+      certificateTemplate: null,
+      walletFront: null,
+      walletBack: null,
+    });
+  }
+
+  async function confirmAddUser() {
+    if (!pendingAddUser) return;
+
+    setIsAdding(true);
+    setErrorMessage('');
+    setStatus('');
+
+    try {
+      if (
+        importOptions.certificateTemplate &&
+        templateDesigns.certificateTemplate === 'different' &&
+        !templateFiles.certificateTemplate
+      ) {
+        throw new Error('Upload a certificate template or choose same design.');
+      }
+
+      if (
+        importOptions.walletCards &&
+        templateDesigns.walletFront === 'different' &&
+        !templateFiles.walletFront
+      ) {
+        throw new Error('Upload a front wallet card design or choose same design.');
+      }
+
+      if (
+        importOptions.walletCards &&
+        templateDesigns.walletBack === 'different' &&
+        !templateFiles.walletBack
+      ) {
+        throw new Error('Upload a back wallet card design or choose same design.');
+      }
+
+      const templateUploads = {
+        certificateTemplate:
+          importOptions.certificateTemplate &&
+          templateDesigns.certificateTemplate === 'different'
+            ? await fileToTemplateUpload(templateFiles.certificateTemplate)
+            : null,
+        walletCards:
+          importOptions.walletCards &&
+          (templateDesigns.walletFront === 'different' ||
+            templateDesigns.walletBack === 'different')
+            ? {
+                front:
+                  templateDesigns.walletFront === 'different'
+                    ? await fileToTemplateUpload(templateFiles.walletFront)
+                    : null,
+                back:
+                  templateDesigns.walletBack === 'different'
+                    ? await fileToTemplateUpload(templateFiles.walletBack)
+                    : null,
+              }
+            : null,
+      };
+      const accessToken = await getAccessToken();
+      const response = await fetch('/.netlify/functions/instructor-users', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: pendingAddUser.email,
+          password: pendingAddUser.password,
+          importOptions,
+          templateDesigns,
+          templateUploads,
+        }),
+      });
+      const data = await readFunctionResponse(response, 'Unable to add email.');
+
+      setNewEmail('');
+      setNewPassword('');
+      setPendingAddUser(null);
+      setTemplateFiles({
+        certificateTemplate: null,
+        walletFront: null,
+        walletBack: null,
+      });
+      setUsers(data?.users || []);
+      setStatus(
+        data?.importedQuizCount
+          ? `Email added. ${data.importedQuizCount} quizzes imported.`
+          : 'Email added. The user can now log in with the password you set.'
+      );
+    } catch (error) {
+      console.error('Add instructor user error:', error);
+      setErrorMessage(error?.message || 'Unable to add email.');
+    } finally {
+      setIsAdding(false);
+    }
+  }
+
+  function openResetPassword(user) {
+    setResetTargetUser(user);
+    setResetPasswordValue('');
+    setResetPasswordError('');
+    setShowResetPassword(false);
+    setErrorMessage('');
+    setStatus('');
+  }
+
+  async function resetPassword() {
+    if (!resetTargetUser?.email) return;
+
+    if (resetPasswordValue.length < 6) {
+      setResetPasswordError('New password must be at least 6 characters.');
+      return;
+    }
+
+    setIsResettingPassword(true);
+    setResettingUserId(resetTargetUser.id);
+    setResetPasswordError('');
+    setErrorMessage('');
+    setStatus('');
+
+    try {
+      const accessToken = await getAccessToken();
+      const response = await fetch('/.netlify/functions/instructor-users', {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: resetTargetUser.email,
+          password: resetPasswordValue,
+        }),
+      });
+      const data = await readFunctionResponse(response, 'Unable to reset password.');
+
+      setUsers(data?.users || []);
+      setResetPasswordValue('');
+      setResetTargetUser(null);
+      setStatus('Password reset.');
+    } catch (error) {
+      console.error('Reset instructor password error:', error);
+      setResetPasswordError(error?.message || 'Unable to reset password.');
+    } finally {
+      setIsResettingPassword(false);
+      setResettingUserId('');
+    }
+  }
+
+  function openFeatureSettings(user) {
+    setFeatureTargetUser(user);
+    setFeatureOptions({
+      walletCards: Boolean(user.imported_assets?.walletCards),
+      certificateTemplate: Boolean(user.imported_assets?.certificateTemplate),
+      quizzes: Boolean(user.imported_assets?.quizzes),
+    });
+    setFeatureTemplateDesigns({
+      walletCardDesign: user.template_designs?.walletCardDesign || 'excourse',
+      walletFront:
+        user.template_designs?.walletFront ||
+        user.template_designs?.walletCards ||
+        'same',
+      walletBack:
+        user.template_designs?.walletBack ||
+        user.template_designs?.walletCards ||
+        'same',
+      certificateTemplate: user.template_designs?.certificateTemplate || 'same',
+      certificateDesign: user.template_designs?.certificateDesign || 'excourse',
+    });
+    setErrorMessage('');
+    setStatus('');
+  }
+
+  function updateFeatureOption(optionName, checked) {
+    setFeatureOptions((currentOptions) => ({
+      walletCards:
+        optionName === 'none'
+          ? false
+          : optionName === 'walletCards'
+            ? checked
+            : currentOptions.walletCards,
+      certificateTemplate:
+        optionName === 'none'
+          ? false
+          : optionName === 'certificateTemplate'
+            ? checked
+            : currentOptions.certificateTemplate,
+      quizzes:
+        optionName === 'none'
+          ? false
+          : optionName === 'quizzes'
+            ? checked
+            : currentOptions.quizzes,
+    }));
+  }
+
+  function updateFeatureTemplateDesign(templateName, design) {
+    setFeatureTemplateDesigns((currentDesigns) => ({
+      ...currentDesigns,
+      [templateName]: design,
+    }));
+  }
+
+  async function saveFeatureSettings() {
+    if (!featureTargetUser?.email) return;
+
+    setIsUpdatingFeatures(true);
+    setErrorMessage('');
+    setStatus('');
+
+    try {
+      const nextFeatureTemplateDesigns = {
+        ...featureTemplateDesigns,
+        walletCards: 'same',
+        walletFront: 'same',
+        walletBack: 'same',
+        certificateTemplate: 'same',
+      };
+      const templateUploads = {
+        certificateTemplate: null,
+        walletCards: null,
+      };
+      const accessToken = await getAccessToken();
+      const response = await fetch('/.netlify/functions/instructor-users', {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'update-features',
+          email: featureTargetUser.email,
+          importOptions: featureOptions,
+          templateDesigns: nextFeatureTemplateDesigns,
+          templateUploads,
+        }),
+      });
+      const data = await readFunctionResponse(response, 'Unable to update features.');
+
+      setUsers(data?.users || []);
+      setFeatureTargetUser(null);
+      setStatus(
+        data?.importedQuizCount
+          ? `Features updated. ${data.importedQuizCount} saved quizzes added to that email's Load Saved Quiz Questions dropdown.`
+          : 'Features updated.'
+      );
+    } catch (error) {
+      console.error('Update instructor features error:', error);
+      setErrorMessage(error?.message || 'Unable to update features.');
+    } finally {
+      setIsUpdatingFeatures(false);
+    }
+  }
+
+  function updateImportOption(optionName, checked) {
+    setImportOptions((currentOptions) => ({
+      ...currentOptions,
+      none: optionName === 'none' ? checked : false,
+      walletCards:
+        optionName === 'none'
+          ? false
+          : optionName === 'walletCards'
+            ? checked
+            : currentOptions.walletCards,
+      certificateTemplate:
+        optionName === 'none'
+          ? false
+          : optionName === 'certificateTemplate'
+            ? checked
+            : currentOptions.certificateTemplate,
+      quizzes:
+        optionName === 'none'
+          ? false
+          : optionName === 'quizzes'
+            ? checked
+            : currentOptions.quizzes,
+    }));
+  }
+
+  function updateTemplateDesign(templateName, design) {
+    setTemplateDesigns((currentDesigns) => ({
+      ...currentDesigns,
+      [templateName]: design,
+    }));
+  }
+
+  function updateWalletTemplateDesign(design) {
+    setTemplateDesigns((currentDesigns) => ({
+      ...currentDesigns,
+      walletFront: design,
+      walletBack: design,
+    }));
+  }
+
+  function updateTemplateFile(templateName, file) {
+    setTemplateFiles((currentFiles) => ({
+      ...currentFiles,
+      [templateName]: file || null,
+    }));
+  }
+
+  async function deleteUser() {
+    if (!deleteTargetUser?.id) return;
+
+    setDeletingUserId(deleteTargetUser.id);
+    setErrorMessage('');
+    setStatus('');
+
+    try {
+      const accessToken = await getAccessToken();
+      const response = await fetch('/.netlify/functions/instructor-users', {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ userId: deleteTargetUser.id }),
+      });
+      const data = await readFunctionResponse(response, 'Unable to delete email.');
+
+      setUsers(data?.users || []);
+      setDeleteTargetUser(null);
+      setStatus('Email and all owned ExCourse data deleted.');
+    } catch (error) {
+      console.error('Delete instructor user error:', error);
+      setErrorMessage(error?.message || 'Unable to delete email.');
+    } finally {
+      setDeletingUserId('');
+    }
+  }
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadUsers();
+    // Settings loads once when the protected page opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <section className="quiz-page">
+      <div className="quiz-card settings-card">
+        <div className="admin-header">
+          <div>
+            <p className="eyebrow">Instructor Settings</p>
+            <h2>Login Emails</h2>
+            <p className="muted">
+              Manage which emails can log in to ExCourse. That email only sees
+              the sessions and quizzes they create.
+            </p>
+          </div>
+
+        </div>
+
+        {errorMessage && (
+          <div className="alert alert-error" role="alert">
+            {errorMessage}
+          </div>
+        )}
+
+        {status && (
+          <div className="alert alert-success" role="status">
+            {status}
+          </div>
+        )}
+
+        <form className="settings-add-email-form" onSubmit={addUser}>
+          <div className="settings-add-email-grid">
+            <label htmlFor="newInstructorEmail">
+              Email
+              <input
+                id="newInstructorEmail"
+                type="email"
+                value={newEmail}
+                onChange={(event) => setNewEmail(event.target.value)}
+                placeholder="name@example.com"
+                autoComplete="email"
+              />
+            </label>
+
+            <label htmlFor="newInstructorPassword">
+              Password
+              <span className="settings-password-control">
+                <input
+                  id="newInstructorPassword"
+                  type={showPassword ? 'text' : 'password'}
+                  value={newPassword}
+                  onChange={(event) => setNewPassword(event.target.value)}
+                  placeholder="At least 6 characters"
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  className="settings-password-toggle"
+                  onClick={() => setShowPassword((currentValue) => !currentValue)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showPassword}
+                  title={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z" />
+                    <circle cx="12" cy="12" r="3" />
+                    {showPassword ? <path d="M4 4l16 16" /> : null}
+                  </svg>
+                </button>
+              </span>
+            </label>
+
+            <div className="settings-email-actions">
+              <button
+                type="submit"
+                className="settings-email-action-button"
+                disabled={isAdding || isResettingPassword}
+              >
+                {isAdding ? 'Adding...' : 'Add Email'}
+              </button>
+            </div>
+          </div>
+        </form>
+
+        <div className="settings-user-list">
+          {users.map((user) => (
+            <div className="settings-user-row" key={user.id}>
+              <div>
+                <strong>{user.email}</strong>
+                <span>Last login: {formatDateTime(user.last_sign_in_at)}</span>
+              </div>
+              <div className="settings-user-actions">
+                {user.email !== 'excourse7233@gmail.com' && (
+                  <>
+                    <button
+                      type="button"
+                      className="secondary-button settings-row-reset-button"
+                      onClick={() => openResetPassword(user)}
+                      disabled={isResettingPassword || isAdding || isUpdatingFeatures}
+                    >
+                      {resettingUserId === user.id ? 'Resetting...' : 'Reset Password'}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button settings-row-reset-button"
+                      onClick={() => openFeatureSettings(user)}
+                      disabled={isAdding || isResettingPassword || isUpdatingFeatures}
+                    >
+                      Manage Features
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button settings-delete-button"
+                      onClick={() => setDeleteTargetUser(user)}
+                      disabled={user.id === currentUserId || deletingUserId === user.id}
+                      aria-label={`Delete ${user.email}`}
+                      title={`Delete ${user.email}`}
+                    >
+                      <svg
+                        aria-hidden="true"
+                        className="settings-trash-icon"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M3 6h18" />
+                        <path d="M8 6V4h8v2" />
+                        <path d="M19 6l-1 14H6L5 6" />
+                        <path d="M10 11v5" />
+                        <path d="M14 11v5" />
+                      </svg>
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {deleteTargetUser && (
+          <div className="quiz-confirm-overlay" role="presentation">
+            <div
+              className="quiz-confirm-popup"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="deleteEmailTitle"
+            >
+              <h3 id="deleteEmailTitle">Delete Email?</h3>
+              <p>
+                This will permanently delete {deleteTargetUser.email}, their
+                login access, and all ExCourse data owned by that email.
+              </p>
+              <div className="quiz-confirm-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setDeleteTargetUser(null)}
+                  disabled={Boolean(deletingUserId)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="quiz-danger-button"
+                  onClick={deleteUser}
+                  disabled={Boolean(deletingUserId)}
+                >
+                  {deletingUserId ? 'Deleting...' : 'Delete Email'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {resetTargetUser && (
+          <div className="quiz-confirm-overlay" role="presentation">
+            <div
+              className="quiz-confirm-popup"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="resetPasswordTitle"
+            >
+              <h3 id="resetPasswordTitle">Reset Password</h3>
+              <p>Enter a new password for {resetTargetUser.email}.</p>
+
+              {resetPasswordError && (
+                <div className="alert alert-error" role="alert">
+                  {resetPasswordError}
+                </div>
+              )}
+
+              <label className="settings-modal-field" htmlFor="resetInstructorPassword">
+                New Password
+                <span className="settings-password-control">
+                  <input
+                    id="resetInstructorPassword"
+                    type={showResetPassword ? 'text' : 'password'}
+                    value={resetPasswordValue}
+                    onChange={(event) => setResetPasswordValue(event.target.value)}
+                    placeholder="At least 6 characters"
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    className="settings-password-toggle"
+                    onClick={() => setShowResetPassword((currentValue) => !currentValue)}
+                    aria-label={showResetPassword ? 'Hide password' : 'Show password'}
+                    aria-pressed={showResetPassword}
+                    title={showResetPassword ? 'Hide password' : 'Show password'}
+                  >
+                    <svg
+                      aria-hidden="true"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z" />
+                      <circle cx="12" cy="12" r="3" />
+                      {showResetPassword ? <path d="M4 4l16 16" /> : null}
+                    </svg>
+                  </button>
+                </span>
+              </label>
+
+              <div className="quiz-confirm-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setResetTargetUser(null)}
+                  disabled={isResettingPassword}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={resetPassword}
+                  disabled={isResettingPassword}
+                >
+                  {isResettingPassword ? 'Resetting...' : 'Reset Password'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {featureTargetUser && (
+          <div className="quiz-confirm-overlay" role="presentation">
+            <div
+              className="quiz-confirm-popup"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="manageFeaturesTitle"
+            >
+              <h3 id="manageFeaturesTitle">Manage Features</h3>
+              <p>
+                Choose which shared resources are available for {featureTargetUser.email}.
+                Every email can create new quizzes by default.
+              </p>
+
+              <div className="settings-import-options">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={
+                      !featureOptions.walletCards &&
+                      !featureOptions.certificateTemplate &&
+                      !featureOptions.quizzes
+                    }
+                    onChange={(event) =>
+                      updateFeatureOption('none', event.target.checked)
+                    }
+                  />
+                  None
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={featureOptions.walletCards}
+                    onChange={(event) =>
+                      updateFeatureOption('walletCards', event.target.checked)
+                    }
+                  />
+                  Wallet cards
+                </label>
+                {featureOptions.walletCards && (
+                  <div className="settings-design-options">
+                    <label className="settings-design-select">
+                      Wallet card design
+                      <select
+                        value={featureTemplateDesigns.walletCardDesign}
+                        onChange={(event) =>
+                          updateFeatureTemplateDesign(
+                            'walletCardDesign',
+                            event.target.value
+                          )
+                        }
+                      >
+                        <option value="excourse">ExCourse wallet cards</option>
+                        <option value="bowman">Bowman Steel wallet cards</option>
+                      </select>
+                    </label>
+                  </div>
+                )}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={featureOptions.certificateTemplate}
+                    onChange={(event) =>
+                      updateFeatureOption(
+                        'certificateTemplate',
+                        event.target.checked
+                      )
+                    }
+                  />
+                  Certificate template
+                </label>
+                {featureOptions.certificateTemplate && (
+                  <div className="settings-design-options">
+                    <label className="settings-design-select">
+                      Certificate design
+                      <select
+                        value={featureTemplateDesigns.certificateDesign}
+                        onChange={(event) =>
+                          updateFeatureTemplateDesign(
+                            'certificateDesign',
+                            event.target.value
+                          )
+                        }
+                      >
+                        <option value="excourse">ExCourse certificate</option>
+                      </select>
+                    </label>
+                  </div>
+                )}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={featureOptions.quizzes}
+                    onChange={(event) =>
+                      updateFeatureOption('quizzes', event.target.checked)
+                    }
+                  />
+                  Saved quiz library
+                </label>
+              </div>
+
+              <div className="quiz-confirm-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setFeatureTargetUser(null)}
+                  disabled={isUpdatingFeatures}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={saveFeatureSettings}
+                  disabled={isUpdatingFeatures}
+                >
+                  {isUpdatingFeatures ? 'Saving...' : 'Save Features'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {pendingAddUser && (
+          <div className="quiz-confirm-overlay" role="presentation">
+            <div
+              className="quiz-confirm-popup"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="addEmailOptionsTitle"
+            >
+              <h3 id="addEmailOptionsTitle">Include Information?</h3>
+              <p>Choose what should be imported for {pendingAddUser.email}.</p>
+
+              <div className="settings-import-options">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={importOptions.none}
+                    onChange={(event) =>
+                      updateImportOption('none', event.target.checked)
+                    }
+                  />
+                  None
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={importOptions.walletCards}
+                    onChange={(event) =>
+                      updateImportOption('walletCards', event.target.checked)
+                    }
+                  />
+                  Wallet cards
+                </label>
+                {importOptions.walletCards && (
+                  <div className="settings-design-options">
+                    <label>
+                      <input
+                        type="radio"
+                        name="walletCardDesign"
+                        value="same"
+                        checked={
+                          templateDesigns.walletFront === 'same' &&
+                          templateDesigns.walletBack === 'same'
+                        }
+                        onChange={() => updateWalletTemplateDesign('same')}
+                      />
+                      Use same wallet card design
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        name="walletCardDesign"
+                        value="different"
+                        checked={
+                          templateDesigns.walletFront === 'different' ||
+                          templateDesigns.walletBack === 'different'
+                        }
+                        onChange={() => updateWalletTemplateDesign('different')}
+                      />
+                      Use different wallet card design
+                    </label>
+                    {(templateDesigns.walletFront === 'different' ||
+                      templateDesigns.walletBack === 'different') && (
+                      <div className="settings-upload-grid">
+                        <label>
+                          Wallet card front design
+                          <input
+                            type="file"
+                            accept="image/*,.pdf,application/pdf"
+                            onChange={(event) =>
+                              updateTemplateFile(
+                                'walletFront',
+                                event.target.files?.[0]
+                              )
+                            }
+                          />
+                          <UploadPreview file={templateFiles.walletFront} />
+                        </label>
+                        <label>
+                          Wallet card back design
+                          <input
+                            type="file"
+                            accept="image/*,.pdf,application/pdf"
+                            onChange={(event) =>
+                              updateTemplateFile(
+                                'walletBack',
+                                event.target.files?.[0]
+                              )
+                            }
+                          />
+                          <UploadPreview file={templateFiles.walletBack} />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                )}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={importOptions.certificateTemplate}
+                    onChange={(event) =>
+                      updateImportOption(
+                        'certificateTemplate',
+                        event.target.checked
+                      )
+                    }
+                  />
+                  Certificate template
+                </label>
+                {importOptions.certificateTemplate && (
+                  <div className="settings-design-options">
+                    <label>
+                      <input
+                        type="radio"
+                        name="certificateTemplateDesign"
+                        value="same"
+                        checked={templateDesigns.certificateTemplate === 'same'}
+                        onChange={() =>
+                          updateTemplateDesign('certificateTemplate', 'same')
+                        }
+                      />
+                      Import same design
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        name="certificateTemplateDesign"
+                        value="different"
+                        checked={templateDesigns.certificateTemplate === 'different'}
+                        onChange={() =>
+                          updateTemplateDesign(
+                            'certificateTemplate',
+                            'different'
+                          )
+                        }
+                      />
+                      Import different design
+                    </label>
+                    {templateDesigns.certificateTemplate === 'different' && (
+                      <div className="settings-upload-grid">
+                        <label>
+                          Upload template
+                          <input
+                            type="file"
+                            accept=".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"
+                            onChange={(event) =>
+                              updateTemplateFile(
+                                'certificateTemplate',
+                                event.target.files?.[0]
+                              )
+                            }
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                )}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={importOptions.quizzes}
+                    onChange={(event) =>
+                      updateImportOption('quizzes', event.target.checked)
+                    }
+                  />
+                  Quizzes
+                </label>
+              </div>
+
+              <div className="quiz-confirm-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setPendingAddUser(null)}
+                  disabled={isAdding}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={confirmAddUser}
+                  disabled={isAdding}
+                >
+                  {isAdding ? 'Adding...' : 'Add Email'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}

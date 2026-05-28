@@ -49,6 +49,65 @@ function mapSavedQuizQuestions(savedQuiz) {
     }));
 }
 
+async function getCurrentUserId() {
+  const { data, error } = await supabase.auth.getUser();
+
+  if (error || !data?.user?.id) {
+    throw new Error('Please sign in again.');
+  }
+
+  return data.user.id;
+}
+
+function isLocalHost() {
+  return (
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1'
+  );
+}
+
+function getSavedQuizLibraryUrl() {
+  if (isLocalHost()) {
+    return 'http://localhost:3001/.netlify/functions/saved-quiz-library';
+  }
+
+  return '/.netlify/functions/saved-quiz-library';
+}
+
+async function syncSavedQuizLibrary() {
+  const { data, error } = await supabase.auth.getSession();
+  const accessToken = data?.session?.access_token;
+
+  if (error || !accessToken) return 0;
+
+  const response = await fetch(getSavedQuizLibraryUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  const responseText = await response.text();
+  let responseData = null;
+
+  if (responseText) {
+    try {
+      responseData = JSON.parse(responseText);
+    } catch {
+      responseData = null;
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      responseData?.error ||
+        (responseText && !responseText.trim().startsWith('<') ? responseText : '') ||
+        `Unable to sync saved quiz library. (${response.status} ${response.statusText})`
+    );
+  }
+
+  return responseData?.importedQuizCount || 0;
+}
+
 export default function CreateQuiz() {
   const qrCodeRef = useRef(null);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -89,10 +148,24 @@ export default function CreateQuiz() {
       setStatusMessage('Loading saved quiz...');
       setDraftStatusMessage('');
 
+      let userId;
+
+      try {
+        userId = await getCurrentUserId();
+      } catch (error) {
+        if (!isActive) return;
+
+        setCreatedQuiz(null);
+        setStatusMessage('');
+        setErrorMessage(error?.message || 'Please sign in again.');
+        return;
+      }
+
       const { data, error } = await supabase
         .from('quiz_templates')
         .select('*')
         .eq('id', quizIdFromUrl)
+        .eq('owner_user_id', userId)
         .maybeSingle();
 
       if (!isActive) return;
@@ -276,9 +349,24 @@ export default function CreateQuiz() {
     setDraftStatusMessage('');
     setIsLoadingSavedQuizzes(true);
 
+    let userId;
+
+    try {
+      userId = await getCurrentUserId();
+      await syncSavedQuizLibrary();
+    } catch (error) {
+      setSavedQuizzes([]);
+      setSelectedSavedQuizId('');
+      setStatusMessage('');
+      setErrorMessage(error?.message || 'Please sign in again.');
+      setIsLoadingSavedQuizzes(false);
+      return;
+    }
+
     const { data, error } = await supabase
       .from('quiz_templates')
       .select('id, course_name, quiz_title, class_date, is_active, created_at')
+      .eq('owner_user_id', userId)
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -312,6 +400,17 @@ export default function CreateQuiz() {
     setDraftStatusMessage('');
     setIsLoadingQuizQuestions(true);
 
+    let userId;
+
+    try {
+      userId = await getCurrentUserId();
+    } catch (error) {
+      setStatusMessage('');
+      setErrorMessage(error?.message || 'Please sign in again.');
+      setIsLoadingQuizQuestions(false);
+      return;
+    }
+
     const { data, error } = await supabase
       .from('quiz_templates')
       .select(`
@@ -330,6 +429,7 @@ export default function CreateQuiz() {
         )
       `)
       .eq('id', selectedSavedQuizId)
+      .eq('owner_user_id', userId)
       .maybeSingle();
 
     if (error || !data) {
@@ -396,6 +496,8 @@ export default function CreateQuiz() {
     setSavingAction(publish ? 'publish' : 'draft');
 
     try {
+      const userId = await getCurrentUserId();
+
       const quizPayload = {
         course_name: courseName.trim(),
         quiz_title: quizTitle.trim(),
@@ -404,6 +506,7 @@ export default function CreateQuiz() {
         class_date: classDate || null,
         passing_score: Number(passingScore),
         is_active: publish,
+        owner_user_id: userId,
       };
 
       let quizTemplate;
@@ -549,8 +652,8 @@ export default function CreateQuiz() {
               <div>
                 <h2>Load Saved Quiz Questions</h2>
                 <p>
-                  Reuse questions from a saved quiz, then edit and save them as
-                  a new quiz.
+                  Reuse questions from saved quizzes available to this email,
+                  then edit and save them as a new quiz.
                 </p>
               </div>
 

@@ -15,6 +15,7 @@ import CreateQuiz from './pages/CreateQuiz';
 import InstructorDashboard from './pages/InstructorDashboard';
 import Login from './pages/Login';
 import QuizResults from './pages/QuizResults';
+import Settings from './pages/Settings';
 import StudentQuiz from './pages/StudentQuiz';
 import { supabase } from './supabaseClient';
 import './App.css';
@@ -25,7 +26,14 @@ const protectedPaths = [
   '/create-quiz-7392',
   '/records-7392',
   '/quiz-results-7392',
+  '/settings-7392',
 ];
+
+const settingsAdminEmail = 'excourse7233@gmail.com';
+
+function isSettingsAdmin(session) {
+  return session?.user?.email?.toLowerCase() === settingsAdminEmail;
+}
 
 function LoadingPage() {
   return (
@@ -58,6 +66,22 @@ function LoginRoute({ session, isAuthLoading }) {
   }
 
   return <Login />;
+}
+
+function SettingsRoute({ session, isAuthLoading }) {
+  if (isAuthLoading) {
+    return <LoadingPage />;
+  }
+
+  if (!session) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (!isSettingsAdmin(session)) {
+    return <Navigate to="/instructor-7392" replace />;
+  }
+
+  return <Settings />;
 }
 
 function AppShell() {
@@ -109,14 +133,18 @@ function AppShell() {
   return (
     <div className="app-shell">
       <header className="top-bar">
-        <div className="brand">
+        <Link
+          to={session ? '/instructor-7392' : '/login'}
+          className="brand"
+          aria-label={session ? 'Go to Instructor Dashboard' : 'Go to login page'}
+        >
           <img
             src="/images/logo.png"
             alt="ExCourse logo"
             className="brand-logo"
           />
           <h1>ExCourse</h1>
-        </div>
+        </Link>
 
         {session && isProtectedPage && (
           <nav className="admin-header-nav" aria-label="Instructor navigation">
@@ -126,9 +154,14 @@ function AppShell() {
             <Link to="/records-7392" className="header-nav-button">
               Attendance Records
             </Link>
-            <Link to="/quiz-results-7392" className="header-nav-button">
-              Quizes
+            <Link to="/create-quiz-7392" className="header-nav-button">
+              Quizzes
             </Link>
+            {isSettingsAdmin(session) && (
+              <Link to="/settings-7392" className="header-nav-button">
+                Settings
+              </Link>
+            )}
             <button type="button" className="logout-button" onClick={handleLogout}>
               Logout
             </button>
@@ -181,6 +214,10 @@ function AppShell() {
                 <AdminRecords />
               </ProtectedRoute>
             }
+          />
+          <Route
+            path="/settings-7392"
+            element={<SettingsRoute session={session} isAuthLoading={isAuthLoading} />}
           />
         </Routes>
       </main>

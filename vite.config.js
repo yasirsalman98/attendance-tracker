@@ -7,6 +7,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': 'http://localhost:3001',
+      '/.netlify/functions': 'http://localhost:3001',
     },
   },
 })

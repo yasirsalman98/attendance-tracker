@@ -146,6 +146,7 @@ export default function StudentQuiz() {
     if (!storedAttempt) return;
 
     try {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setResult(JSON.parse(storedAttempt));
       setStatus('');
     } catch (error) {

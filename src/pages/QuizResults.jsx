@@ -110,6 +110,16 @@ function downloadCsv(quiz, attempts) {
   window.URL.revokeObjectURL(url);
 }
 
+async function getCurrentUserId() {
+  const { data, error } = await supabase.auth.getUser();
+
+  if (error || !data?.user?.id) {
+    throw new Error('Please sign in again.');
+  }
+
+  return data.user.id;
+}
+
 export default function QuizResults() {
   const quizDropdownRef = useRef(null);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -149,6 +159,18 @@ export default function QuizResults() {
   async function loadQuizzes(preferredQuizId = selectedQuizId) {
     setStatus('Loading quizzes...');
 
+    let userId;
+
+    try {
+      userId = await getCurrentUserId();
+    } catch (error) {
+      setQuizzes([]);
+      setSelectedQuizId('');
+      setAttempts([]);
+      setStatus(error?.message || 'Please sign in again.');
+      return;
+    }
+
     const { data, error } = await supabase
       .from('quiz_templates')
       .select(`
@@ -159,6 +181,8 @@ export default function QuizResults() {
           sort_order
         )
       `)
+      .eq('owner_user_id', userId)
+      .eq('is_active', true)
       .order('created_at', { ascending: false });
 
     if (error) {

@@ -2,6 +2,10 @@ import { createClient } from '@supabase/supabase-js';
 import crypto from 'node:crypto';
 
 const settingsAdminEmail = 'excourse7233@gmail.com';
+const legacyQuizOwnerEmails = [
+  settingsAdminEmail,
+  'excourse7233@exceedsafety.com',
+];
 const templateBucketName = 'instructor-templates';
 
 function jsonResponse(statusCode, body) {
@@ -142,6 +146,26 @@ async function listUsers(adminClient) {
     .map(serializeUser)
     .filter((user) => user.email)
     .sort((left, right) => left.email.localeCompare(right.email));
+}
+
+async function listAuthUsers(adminClient) {
+  const { data, error } = await adminClient.auth.admin.listUsers({
+    page: 1,
+    perPage: 1000,
+  });
+
+  if (error) throw error;
+
+  return data?.users || [];
+}
+
+async function getUsersByEmails(adminClient, emails) {
+  const authUsers = await listAuthUsers(adminClient);
+  const wantedEmails = new Set(emails.map(normalizeEmail));
+
+  return authUsers.filter((user) =>
+    wantedEmails.has(normalizeEmail(user.email))
+  );
 }
 
 function getUniqueValues(values) {
@@ -452,6 +476,21 @@ async function copyQuizzesToUser(adminClient, sourceUserId, targetUserId) {
   return copiedCount;
 }
 
+async function copyQuizzesFromUsers(adminClient, sourceUsers, targetUserId) {
+  let copiedCount = 0;
+
+  for (const sourceUser of sourceUsers) {
+    if (sourceUser.id === targetUserId) continue;
+    copiedCount += await copyQuizzesToUser(
+      adminClient,
+      sourceUser.id,
+      targetUserId
+    );
+  }
+
+  return copiedCount;
+}
+
 async function getSavedLibraryQuizKeys(adminClient, sourceUserId) {
   const { data, error } = await adminClient
     .from('quiz_templates')
@@ -479,6 +518,13 @@ async function removeSavedLibraryCopies(adminClient, sourceUserId, targetUserId)
       .eq('is_active', false);
 
     if (error) throw error;
+  }
+}
+
+async function removeSavedLibraryCopiesFromUsers(adminClient, sourceUsers, targetUserId) {
+  for (const sourceUser of sourceUsers) {
+    if (sourceUser.id === targetUserId) continue;
+    await removeSavedLibraryCopies(adminClient, sourceUser.id, targetUserId);
   }
 }
 
@@ -595,9 +641,14 @@ export async function handler(event) {
         }
 
         if (importOptions.quizzes && createdUser?.id) {
-          importedQuizCount = await copyQuizzesToUser(
+          const sourceUsers = await getUsersByEmails(
             adminClient,
-            user.id,
+            legacyQuizOwnerEmails
+          );
+
+          importedQuizCount = await copyQuizzesFromUsers(
+            adminClient,
+            sourceUsers,
             createdUser.id
           );
         }
@@ -685,16 +736,25 @@ export async function handler(event) {
 
         let importedQuizCount = 0;
 
+        const sourceUsers = await getUsersByEmails(
+          adminClient,
+          legacyQuizOwnerEmails
+        );
+
         if (nextAssets.quizzes) {
-          importedQuizCount = await copyQuizzesToUser(
+          importedQuizCount = await copyQuizzesFromUsers(
             adminClient,
-            user.id,
+            sourceUsers,
             existingUser.id
           );
         }
 
         if (!nextAssets.quizzes) {
-          await removeSavedLibraryCopies(adminClient, user.id, existingUser.id);
+          await removeSavedLibraryCopiesFromUsers(
+            adminClient,
+            sourceUsers,
+            existingUser.id
+          );
         }
 
         return jsonResponse(200, {

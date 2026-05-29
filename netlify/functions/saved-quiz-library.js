@@ -1,6 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
 
 const settingsAdminEmail = 'excourse7233@gmail.com';
+const legacyQuizOwnerEmails = [
+  settingsAdminEmail,
+  'excourse7233@exceedsafety.com',
+];
 
 function jsonResponse(statusCode, body) {
   return {
@@ -47,11 +51,15 @@ function hasSavedQuizLibrary(user) {
   return Boolean(user?.user_metadata?.imported_assets?.quizzes);
 }
 
-function isSettingsAdmin(user) {
-  return String(user?.email || '').toLowerCase() === settingsAdminEmail;
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
 }
 
-async function getUserByEmail(adminClient, email) {
+function isSettingsAdmin(user) {
+  return normalizeEmail(user?.email) === settingsAdminEmail;
+}
+
+async function listAuthUsers(adminClient) {
   const { data, error } = await adminClient.auth.admin.listUsers({
     page: 1,
     perPage: 1000,
@@ -59,23 +67,25 @@ async function getUserByEmail(adminClient, email) {
 
   if (error) throw error;
 
-  return (data?.users || []).find(
-    (user) => String(user.email || '').toLowerCase() === email
+  return data?.users || [];
+}
+
+async function getUsersByEmails(adminClient, emails) {
+  const authUsers = await listAuthUsers(adminClient);
+  const wantedEmails = new Set(emails.map(normalizeEmail));
+
+  return authUsers.filter((user) =>
+    wantedEmails.has(normalizeEmail(user.email))
   );
 }
 
 async function getUserEmailMap(adminClient) {
-  const { data, error } = await adminClient.auth.admin.listUsers({
-    page: 1,
-    perPage: 1000,
-  });
-
-  if (error) throw error;
+  const authUsers = await listAuthUsers(adminClient);
 
   return new Map(
-    (data?.users || []).map((user) => [
+    authUsers.map((user) => [
       user.id,
-      String(user.email || '').toLowerCase(),
+      normalizeEmail(user.email),
     ])
   );
 }
@@ -114,6 +124,13 @@ async function removeSavedLibraryCopies(adminClient, sourceUserId, targetUserId)
       .eq('is_active', false);
 
     if (error) throw error;
+  }
+}
+
+async function removeSavedLibraryCopiesFromUsers(adminClient, sourceUsers, targetUserId) {
+  for (const sourceUser of sourceUsers) {
+    if (sourceUser.id === targetUserId) continue;
+    await removeSavedLibraryCopies(adminClient, sourceUser.id, targetUserId);
   }
 }
 
@@ -214,6 +231,21 @@ async function copyQuizzesToUser(adminClient, sourceUserId, targetUserId) {
     }
 
     copiedCount += 1;
+  }
+
+  return copiedCount;
+}
+
+async function copyQuizzesFromUsers(adminClient, sourceUsers, targetUserId) {
+  let copiedCount = 0;
+
+  for (const sourceUser of sourceUsers) {
+    if (sourceUser.id === targetUserId) continue;
+    copiedCount += await copyQuizzesToUser(
+      adminClient,
+      sourceUser.id,
+      targetUserId
+    );
   }
 
   return copiedCount;
@@ -324,12 +356,6 @@ export async function handler(event) {
       return jsonResponse(200, { savedQuizzes });
     }
 
-    const sourceUser = await getUserByEmail(adminClient, settingsAdminEmail);
-
-    if (!sourceUser?.id) {
-      return jsonResponse(404, { error: 'Saved quiz library owner was not found.' });
-    }
-
     if (isSettingsAdmin(userData.user)) {
       return jsonResponse(200, {
         importedQuizCount: 0,
@@ -337,8 +363,18 @@ export async function handler(event) {
       });
     }
 
+    const sourceUsers = await getUsersByEmails(adminClient, legacyQuizOwnerEmails);
+
+    if (sourceUsers.length === 0) {
+      return jsonResponse(404, { error: 'Saved quiz library owner was not found.' });
+    }
+
     if (!hasSavedQuizLibrary(userData.user)) {
-      await removeSavedLibraryCopies(adminClient, sourceUser.id, userData.user.id);
+      await removeSavedLibraryCopiesFromUsers(
+        adminClient,
+        sourceUsers,
+        userData.user.id
+      );
 
       return jsonResponse(200, {
         importedQuizCount: 0,
@@ -347,9 +383,9 @@ export async function handler(event) {
       });
     }
 
-    const importedQuizCount = await copyQuizzesToUser(
+    const importedQuizCount = await copyQuizzesFromUsers(
       adminClient,
-      sourceUser.id,
+      sourceUsers,
       userData.user.id
     );
 

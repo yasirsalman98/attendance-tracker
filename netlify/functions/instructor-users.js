@@ -372,6 +372,18 @@ async function copyQuizzesToUser(adminClient, sourceUserId, targetUserId) {
   let copiedCount = 0;
 
   for (const quiz of quizzes || []) {
+    const { data: existingCopies, error: existingCopyError } = await adminClient
+      .from('quiz_templates')
+      .select('id')
+      .eq('owner_user_id', targetUserId)
+      .eq('course_name', quiz.course_name)
+      .eq('quiz_title', quiz.quiz_title)
+      .eq('is_active', false)
+      .limit(1);
+
+    if (existingCopyError) throw existingCopyError;
+    if ((existingCopies || []).length > 0) continue;
+
     const { data: copiedQuiz, error: quizError } = await adminClient
       .from('quiz_templates')
       .insert({
@@ -444,27 +456,6 @@ async function getSavedLibraryQuizKeys(adminClient, sourceUserId) {
     courseName: quiz.course_name,
     quizTitle: quiz.quiz_title,
   }));
-}
-
-async function countSavedLibraryCopies(adminClient, sourceUserId, targetUserId) {
-  const libraryQuizKeys = await getSavedLibraryQuizKeys(adminClient, sourceUserId);
-  let copiedCount = 0;
-
-  for (const quizKey of libraryQuizKeys) {
-    const { count, error } = await adminClient
-      .from('quiz_templates')
-      .select('id', { count: 'exact', head: true })
-      .eq('owner_user_id', targetUserId)
-      .eq('course_name', quizKey.courseName)
-      .eq('quiz_title', quizKey.quizTitle)
-      .eq('is_active', false);
-
-    if (error) throw error;
-
-    copiedCount += count || 0;
-  }
-
-  return copiedCount;
 }
 
 async function removeSavedLibraryCopies(adminClient, sourceUserId, targetUserId) {
@@ -646,7 +637,6 @@ export async function handler(event) {
         }
 
         const currentMetadata = currentUserData.user.user_metadata || {};
-        const previousAssets = normalizeImportOptions(currentMetadata.imported_assets);
         const nextAssets = normalizeImportOptions(body.importOptions);
         const nextTemplateDesigns = normalizeTemplateDesigns(body.templateDesigns);
         const templateUploads = body.templateUploads || {};
@@ -686,14 +676,8 @@ export async function handler(event) {
         if (metadataError) throw metadataError;
 
         let importedQuizCount = 0;
-        const savedLibraryCopyCount = nextAssets.quizzes
-          ? await countSavedLibraryCopies(adminClient, user.id, existingUser.id)
-          : 0;
 
-        if (
-          nextAssets.quizzes &&
-          (!previousAssets.quizzes || savedLibraryCopyCount === 0)
-        ) {
+        if (nextAssets.quizzes) {
           importedQuizCount = await copyQuizzesToUser(
             adminClient,
             user.id,

@@ -66,27 +66,6 @@ async function getSavedLibraryQuizKeys(adminClient, sourceUserId) {
   }));
 }
 
-async function countSavedLibraryCopies(adminClient, sourceUserId, targetUserId) {
-  const libraryQuizKeys = await getSavedLibraryQuizKeys(adminClient, sourceUserId);
-  let copiedCount = 0;
-
-  for (const quizKey of libraryQuizKeys) {
-    const { count, error } = await adminClient
-      .from('quiz_templates')
-      .select('id', { count: 'exact', head: true })
-      .eq('owner_user_id', targetUserId)
-      .eq('course_name', quizKey.courseName)
-      .eq('quiz_title', quizKey.quizTitle)
-      .eq('is_active', false);
-
-    if (error) throw error;
-
-    copiedCount += count || 0;
-  }
-
-  return copiedCount;
-}
-
 async function removeSavedLibraryCopies(adminClient, sourceUserId, targetUserId) {
   const libraryQuizKeys = await getSavedLibraryQuizKeys(adminClient, sourceUserId);
 
@@ -133,6 +112,18 @@ async function copyQuizzesToUser(adminClient, sourceUserId, targetUserId) {
   let copiedCount = 0;
 
   for (const quiz of quizzes || []) {
+    const { data: existingCopies, error: existingCopyError } = await adminClient
+      .from('quiz_templates')
+      .select('id')
+      .eq('owner_user_id', targetUserId)
+      .eq('course_name', quiz.course_name)
+      .eq('quiz_title', quiz.quiz_title)
+      .eq('is_active', false)
+      .limit(1);
+
+    if (existingCopyError) throw existingCopyError;
+    if ((existingCopies || []).length > 0) continue;
+
     const { data: copiedQuiz, error: quizError } = await adminClient
       .from('quiz_templates')
       .insert({
@@ -235,16 +226,6 @@ export async function handler(event) {
         removedSavedLibrary: true,
         skipped: true,
       });
-    }
-
-    const savedLibraryCopyCount = await countSavedLibraryCopies(
-      adminClient,
-      sourceUser.id,
-      userData.user.id
-    );
-
-    if (savedLibraryCopyCount > 0) {
-      return jsonResponse(200, { importedQuizCount: 0, skipped: true });
     }
 
     const importedQuizCount = await copyQuizzesToUser(

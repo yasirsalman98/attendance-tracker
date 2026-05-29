@@ -37,6 +37,14 @@ function getSupabaseClient(key, accessToken = '') {
   });
 }
 
+function getServiceRoleKey() {
+  return (
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SERVICE_ROLE_SECRET ||
+    process.env.service_role_secret
+  );
+}
+
 function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
@@ -499,7 +507,7 @@ async function getCurrentUser(event) {
 }
 
 export async function handler(event) {
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const serviceRoleKey = getServiceRoleKey();
   const adminClient = getSupabaseClient(serviceRoleKey);
 
   if (!adminClient) {

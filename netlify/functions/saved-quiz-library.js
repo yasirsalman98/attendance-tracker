@@ -35,6 +35,14 @@ function getSupabaseClient(key, accessToken = '') {
   });
 }
 
+function getServiceRoleKey() {
+  return (
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SERVICE_ROLE_SECRET ||
+    process.env.service_role_secret
+  );
+}
+
 function hasSavedQuizLibrary(user) {
   return Boolean(user?.user_metadata?.imported_assets?.quizzes);
 }
@@ -190,7 +198,7 @@ export async function handler(event) {
   }
 
   const anonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const serviceRoleKey = getServiceRoleKey();
   const authHeader = event.headers.authorization || event.headers.Authorization || '';
   const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
 

@@ -10,7 +10,10 @@ create table if not exists public.quiz_templates (
   passing_score numeric not null default 80,
   quiz_duration_minutes integer not null default 30,
   is_active boolean not null default true,
+  is_saved_template boolean not null default false,
   results_saved boolean not null default false,
+  force_submit boolean not null default false,
+  finalizing boolean not null default false,
   owner_user_id uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -23,7 +26,16 @@ alter table public.quiz_templates
 add column if not exists quiz_duration_minutes integer not null default 30;
 
 alter table public.quiz_templates
+add column if not exists is_saved_template boolean not null default false;
+
+alter table public.quiz_templates
 add column if not exists results_saved boolean not null default false;
+
+alter table public.quiz_templates
+add column if not exists force_submit boolean not null default false;
+
+alter table public.quiz_templates
+add column if not exists finalizing boolean not null default false;
 
 alter table public.quiz_templates
 drop constraint if exists quiz_templates_duration_check;
@@ -35,12 +47,25 @@ add constraint quiz_templates_duration_check
 create index if not exists quiz_templates_owner_user_id_idx
   on public.quiz_templates (owner_user_id);
 
+create index if not exists quiz_templates_saved_template_idx
+  on public.quiz_templates (owner_user_id, is_saved_template, created_at desc);
+
 update public.quiz_templates
 set owner_user_id = (
   select id from auth.users order by created_at asc limit 1
 )
 where owner_user_id is null
   and exists (select 1 from auth.users);
+
+update public.quiz_templates
+set is_saved_template = true
+where is_active = false
+  and coalesce(results_saved, false) = false;
+
+update public.quiz_templates
+set is_saved_template = false
+where is_active = true
+  or coalesce(results_saved, false) = true;
 
 create table if not exists public.quiz_questions (
   id uuid primary key default gen_random_uuid(),
@@ -72,9 +97,13 @@ create table if not exists public.quiz_attempts (
   total_questions integer not null default 0,
   percentage numeric not null default 0,
   passed boolean not null default false,
+  submission_key text,
   submitted_at timestamptz not null default now(),
   created_at timestamptz not null default now()
 );
+
+alter table public.quiz_attempts
+add column if not exists submission_key text;
 
 create table if not exists public.quiz_attempt_answers (
   id uuid primary key default gen_random_uuid(),
@@ -93,6 +122,10 @@ create index if not exists quiz_answer_choices_question_id_sort_idx
 
 create index if not exists quiz_attempts_template_id_submitted_idx
   on public.quiz_attempts (quiz_template_id, submitted_at desc);
+
+create unique index if not exists quiz_attempts_template_submission_key_idx
+  on public.quiz_attempts (quiz_template_id, submission_key)
+  where submission_key is not null;
 
 create index if not exists quiz_attempt_answers_attempt_id_idx
   on public.quiz_attempt_answers (quiz_attempt_id);
@@ -113,11 +146,46 @@ before update on public.quiz_templates
 for each row
 execute function public.set_updated_at();
 
+create or replace function public.finalize_expired_quiz_session(p_quiz_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update public.quiz_templates
+  set
+    force_submit = true,
+    finalizing = true,
+    results_saved = true,
+    is_active = false,
+    is_saved_template = false
+  where id = p_quiz_id
+    and coalesce(results_saved, false) = false
+    and now() >= created_at + make_interval(mins => quiz_duration_minutes);
+end;
+$$;
+
 alter table public.quiz_templates enable row level security;
 alter table public.quiz_questions enable row level security;
 alter table public.quiz_answer_choices enable row level security;
 alter table public.quiz_attempts enable row level security;
 alter table public.quiz_attempt_answers enable row level security;
+
+do $$
+begin
+  if exists (
+    select 1 from pg_publication where pubname = 'supabase_realtime'
+  ) and not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'quiz_templates'
+  ) then
+    alter publication supabase_realtime add table public.quiz_templates;
+  end if;
+end $$;
 
 grant usage on schema public to anon, authenticated, service_role;
 
@@ -145,13 +213,21 @@ grant select, insert, update, delete on public.quiz_answer_choices to service_ro
 grant select, insert, update, delete on public.quiz_attempts to service_role;
 grant select, insert, update, delete on public.quiz_attempt_answers to service_role;
 
+grant execute on function public.finalize_expired_quiz_session(uuid)
+to anon, authenticated, service_role;
+
 drop policy if exists "Anon can manage quiz templates" on public.quiz_templates;
 drop policy if exists "Anon can read active quiz templates" on public.quiz_templates;
 create policy "Anon can read active quiz templates"
 on public.quiz_templates
 for select
 to anon
-using (is_active = true);
+using (
+  is_active = true
+  or force_submit = true
+  or finalizing = true
+  or results_saved = true
+);
 
 drop policy if exists "Anon can manage quiz questions" on public.quiz_questions;
 drop policy if exists "Anon can read quiz questions" on public.quiz_questions;
@@ -164,7 +240,12 @@ using (
     select 1
     from public.quiz_templates
     where quiz_templates.id = quiz_questions.quiz_template_id
-      and quiz_templates.is_active = true
+      and (
+        quiz_templates.is_active = true
+        or quiz_templates.force_submit = true
+        or quiz_templates.finalizing = true
+        or quiz_templates.results_saved = true
+      )
   )
 );
 
@@ -181,7 +262,12 @@ using (
     join public.quiz_templates
       on quiz_templates.id = quiz_questions.quiz_template_id
     where quiz_questions.id = quiz_answer_choices.question_id
-      and quiz_templates.is_active = true
+      and (
+        quiz_templates.is_active = true
+        or quiz_templates.force_submit = true
+        or quiz_templates.finalizing = true
+        or quiz_templates.results_saved = true
+      )
   )
 );
 
@@ -196,7 +282,12 @@ with check (
     select 1
     from public.quiz_templates
     where quiz_templates.id = quiz_attempts.quiz_template_id
-      and quiz_templates.is_active = true
+      and (
+        quiz_templates.is_active = true
+        or quiz_templates.force_submit = true
+        or quiz_templates.finalizing = true
+        or quiz_templates.results_saved = true
+      )
   )
 );
 

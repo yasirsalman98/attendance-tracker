@@ -59,6 +59,10 @@ function isSettingsAdmin(user) {
   return normalizeEmail(user?.email) === settingsAdminEmail;
 }
 
+function isMissingSavedTemplateColumn(error) {
+  return String(error?.message || '').toLowerCase().includes('is_saved_template');
+}
+
 function getQueryParam(event, key) {
   if (event.queryStringParameters?.[key]) {
     return event.queryStringParameters[key];
@@ -107,10 +111,24 @@ function withOwnerEmail(quiz, userEmailById) {
 }
 
 async function getSavedLibraryQuizKeys(adminClient, sourceUserId) {
-  const { data, error } = await adminClient
-    .from('quiz_templates')
-    .select('course_name, quiz_title')
-    .eq('owner_user_id', sourceUserId);
+  const selectKeys = (useSavedTemplateFlag) => {
+    let query = adminClient
+      .from('quiz_templates')
+      .select('course_name, quiz_title')
+      .eq('owner_user_id', sourceUserId);
+
+    return useSavedTemplateFlag
+      ? query.eq('is_saved_template', true)
+      : query.eq('is_active', false).eq('results_saved', false);
+  };
+
+  let { data, error } = await selectKeys(true);
+
+  if (isMissingSavedTemplateColumn(error)) {
+    const fallbackResponse = await selectKeys(false);
+    data = fallbackResponse.data;
+    error = fallbackResponse.error;
+  }
 
   if (error) throw error;
 
@@ -130,7 +148,8 @@ async function removeSavedLibraryCopies(adminClient, sourceUserId, targetUserId)
       .eq('owner_user_id', targetUserId)
       .eq('course_name', quizKey.courseName)
       .eq('quiz_title', quizKey.quizTitle)
-      .eq('is_active', false);
+      .eq('is_active', false)
+      .eq('results_saved', false);
 
     if (error) throw error;
   }
@@ -144,29 +163,43 @@ async function removeSavedLibraryCopiesFromUsers(adminClient, sourceUsers, targe
 }
 
 async function copyQuizzesToUser(adminClient, sourceUserId, targetUserId) {
-  const { data: quizzes, error } = await adminClient
-    .from('quiz_templates')
-    .select(`
-      course_name,
-      quiz_title,
-      quiz_description,
-      instructor_name,
-      class_date,
-      passing_score,
-      quiz_duration_minutes,
-      quiz_questions (
-        question_text,
-        question_type,
-        sort_order,
-        quiz_answer_choices (
-          choice_text,
-          is_correct,
-          sort_order
+  const selectReusableQuizzes = (useSavedTemplateFlag) => {
+    let query = adminClient
+      .from('quiz_templates')
+      .select(`
+        course_name,
+        quiz_title,
+        quiz_description,
+        instructor_name,
+        class_date,
+        passing_score,
+        quiz_duration_minutes,
+        quiz_questions (
+          question_text,
+          question_type,
+          sort_order,
+          quiz_answer_choices (
+            choice_text,
+            is_correct,
+            sort_order
+          )
         )
-      )
-    `)
-    .eq('owner_user_id', sourceUserId)
-    .order('created_at', { ascending: false });
+      `)
+      .eq('owner_user_id', sourceUserId)
+      .order('created_at', { ascending: false });
+
+    return useSavedTemplateFlag
+      ? query.eq('is_saved_template', true)
+      : query.eq('is_active', false).eq('results_saved', false);
+  };
+
+  let { data: quizzes, error } = await selectReusableQuizzes(true);
+
+  if (isMissingSavedTemplateColumn(error)) {
+    const fallbackResponse = await selectReusableQuizzes(false);
+    quizzes = fallbackResponse.data;
+    error = fallbackResponse.error;
+  }
 
   if (error) throw error;
 
@@ -180,12 +213,13 @@ async function copyQuizzesToUser(adminClient, sourceUserId, targetUserId) {
       .eq('course_name', quiz.course_name)
       .eq('quiz_title', quiz.quiz_title)
       .eq('is_active', false)
+      .eq('results_saved', false)
       .limit(1);
 
     if (existingCopyError) throw existingCopyError;
     if ((existingCopies || []).length > 0) continue;
 
-    const { data: copiedQuiz, error: quizError } = await adminClient
+    let { data: copiedQuiz, error: quizError } = await adminClient
       .from('quiz_templates')
       .insert({
         course_name: quiz.course_name,
@@ -196,10 +230,32 @@ async function copyQuizzesToUser(adminClient, sourceUserId, targetUserId) {
         passing_score: quiz.passing_score,
         quiz_duration_minutes: quiz.quiz_duration_minutes || 30,
         is_active: false,
+        is_saved_template: true,
         owner_user_id: targetUserId,
       })
       .select('id')
       .single();
+
+    if (isMissingSavedTemplateColumn(quizError)) {
+      const fallbackResponse = await adminClient
+        .from('quiz_templates')
+        .insert({
+          course_name: quiz.course_name,
+          quiz_title: quiz.quiz_title,
+          quiz_description: quiz.quiz_description,
+          instructor_name: quiz.instructor_name,
+          class_date: quiz.class_date,
+          passing_score: quiz.passing_score,
+          quiz_duration_minutes: quiz.quiz_duration_minutes || 30,
+          is_active: false,
+          owner_user_id: targetUserId,
+        })
+        .select('id')
+        .single();
+
+      copiedQuiz = fallbackResponse.data;
+      quizError = fallbackResponse.error;
+    }
 
     if (quizError) throw quizError;
 
@@ -261,16 +317,34 @@ async function copyQuizzesFromUsers(adminClient, sourceUsers, targetUserId) {
 }
 
 async function listSavedQuizzes(adminClient, user) {
-  let query = adminClient
-    .from('quiz_templates')
-    .select('id, course_name, quiz_title, class_date, is_active, quiz_duration_minutes, created_at, owner_user_id')
-    .order('created_at', { ascending: false });
+  const selectSavedQuizzes = (useSavedTemplateFlag) => {
+    let query = adminClient
+      .from('quiz_templates')
+      .select(
+        useSavedTemplateFlag
+          ? 'id, course_name, quiz_title, class_date, is_active, results_saved, is_saved_template, quiz_duration_minutes, created_at, owner_user_id'
+          : 'id, course_name, quiz_title, class_date, is_active, results_saved, quiz_duration_minutes, created_at, owner_user_id'
+      )
+      .order('created_at', { ascending: false });
 
-  if (!isSettingsAdmin(user)) {
-    query = query.eq('owner_user_id', user.id);
+    query = useSavedTemplateFlag
+      ? query.eq('is_saved_template', true)
+      : query.eq('is_active', false).eq('results_saved', false);
+
+    if (!isSettingsAdmin(user)) {
+      query = query.eq('owner_user_id', user.id);
+    }
+
+    return query;
+  };
+
+  let { data, error } = await selectSavedQuizzes(true);
+
+  if (isMissingSavedTemplateColumn(error)) {
+    const fallbackResponse = await selectSavedQuizzes(false);
+    data = fallbackResponse.data;
+    error = fallbackResponse.error;
   }
-
-  const { data, error } = await query;
 
   if (error) throw error;
 
@@ -284,30 +358,44 @@ async function listSavedQuizzes(adminClient, user) {
 }
 
 async function getSavedQuizDetails(adminClient, user, quizId) {
-  let query = adminClient
-    .from('quiz_templates')
-    .select(`
-      *,
-      quiz_questions (
-        id,
-        question_text,
-        question_type,
-        sort_order,
-        quiz_answer_choices (
+  const selectSavedQuizDetails = (useSavedTemplateFlag) => {
+    let query = adminClient
+      .from('quiz_templates')
+      .select(`
+        *,
+        quiz_questions (
           id,
-          choice_text,
-          is_correct,
-          sort_order
+          question_text,
+          question_type,
+          sort_order,
+          quiz_answer_choices (
+            id,
+            choice_text,
+            is_correct,
+            sort_order
+          )
         )
-      )
-    `)
-    .eq('id', quizId);
+      `)
+      .eq('id', quizId);
 
-  if (!isSettingsAdmin(user)) {
-    query = query.eq('owner_user_id', user.id);
+    query = useSavedTemplateFlag
+      ? query.eq('is_saved_template', true)
+      : query.eq('is_active', false).eq('results_saved', false);
+
+    if (!isSettingsAdmin(user)) {
+      query = query.eq('owner_user_id', user.id);
+    }
+
+    return query;
+  };
+
+  let { data, error } = await selectSavedQuizDetails(true).maybeSingle();
+
+  if (isMissingSavedTemplateColumn(error)) {
+    const fallbackResponse = await selectSavedQuizDetails(false).maybeSingle();
+    data = fallbackResponse.data;
+    error = fallbackResponse.error;
   }
-
-  const { data, error } = await query.maybeSingle();
 
   if (error) throw error;
 

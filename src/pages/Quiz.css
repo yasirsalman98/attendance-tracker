@@ -95,6 +95,16 @@
   justify-content: flex-start;
 }
 
+.quizzes-nav-row {
+  justify-content: space-between;
+}
+
+.quiz-nav-link-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 .quiz-section-header {
   justify-content: space-between;
 }
@@ -185,6 +195,30 @@
   grid-template-columns: 1fr auto auto auto;
   gap: 10px;
   align-items: center;
+}
+
+.saved-quiz-edit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.saved-quiz-delete-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.saved-quiz-edit-button {
+  min-height: 48px;
+  white-space: nowrap;
+}
+
+.saved-quiz-delete-action {
+  min-height: 48px;
+  white-space: nowrap;
 }
 
 .clear-loaded-quiz-button {
@@ -403,6 +437,10 @@
 .quiz-save-actions .secondary-button {
   min-height: 58px;
   font-size: 1rem;
+}
+
+.quiz-save-actions > .primary-button:only-child {
+  grid-column: 1 / -1;
 }
 
 .quiz-bottom-status {
@@ -806,6 +844,175 @@
   gap: 12px;
 }
 
+.live-session-layout {
+  gap: 18px;
+}
+
+.live-session-card {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid #dde3ea;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.live-status-card {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.live-status-heading {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px;
+  align-items: center;
+}
+
+.live-status-heading h2,
+.live-card-header h2,
+.danger-zone-card h2 {
+  margin: 0;
+  color: #111827;
+}
+
+.live-status-heading p,
+.danger-zone-card p {
+  margin: 4px 0 0;
+  color: #52616f;
+}
+
+.live-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 76px;
+  min-height: 38px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: #047857;
+  color: #ffffff;
+  font-weight: 900;
+}
+
+.live-status-pill.is-ended {
+  background: #b91c1c;
+}
+
+.live-session-detail-grid,
+.live-results-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.live-session-detail-grid div,
+.live-results-grid div,
+.most-missed-card {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.live-session-detail-grid dt,
+.live-results-grid span,
+.most-missed-card span {
+  color: #52616f;
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+
+.live-session-detail-grid dd,
+.live-results-grid strong,
+.most-missed-card strong {
+  margin: 0;
+  color: #111827;
+  font-weight: 900;
+}
+
+.live-results-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.live-results-grid strong {
+  color: #036f5e;
+  font-size: 1.55rem;
+}
+
+.live-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.live-card-header span {
+  color: #52616f;
+  font-weight: 800;
+}
+
+.student-access-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 22px;
+  align-items: center;
+}
+
+.student-access-qr,
+.student-access-actions {
+  display: grid;
+  gap: 12px;
+}
+
+.student-access-actions {
+  grid-template-columns: 1fr;
+}
+
+.live-results-empty {
+  margin: 0;
+  padding: 18px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  text-align: center;
+}
+
+.most-missed-card p {
+  margin: 0;
+  color: #52616f;
+  font-weight: 800;
+}
+
+.live-results-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.live-results-action-note,
+.live-results-saved-note {
+  margin: 0;
+  color: #52616f;
+  font-weight: 800;
+}
+
+.live-results-saved-note {
+  color: #166534;
+}
+
+.danger-zone-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
 .quiz-summary,
 .quiz-result-details,
 .results-stat-grid,
@@ -1095,13 +1302,19 @@
   gap: 10px;
 }
 
-.quiz-page .quiz-danger-button {
-  background: #dc2626;
+.quiz-page button.quiz-danger-button {
+  background: #b42318;
   color: #ffffff;
 }
 
-.quiz-page .quiz-danger-button:hover {
-  background: #b91c1c;
+.quiz-page button.quiz-danger-button:hover {
+  background: #991b1b;
+}
+
+.quiz-page button.quiz-danger-button:disabled,
+.quiz-page button.quiz-danger-button:disabled:hover {
+  background: #e5a6a1;
+  color: #ffffff;
 }
 
 select {
@@ -1175,6 +1388,13 @@ select {
     .settings-add-email-grid,
     .settings-user-row,
     .load-quiz-row,
+    .saved-quiz-edit-row,
+    .saved-quiz-delete-row,
+    .live-status-heading,
+    .live-session-detail-grid,
+    .live-results-grid,
+    .student-access-grid,
+    .danger-zone-card,
     .copy-row,
     .qr-code-box,
     .quiz-dropdown-search,

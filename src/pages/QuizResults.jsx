@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
+import {
+  downloadQuizResultsCsv,
+  formatDateTime,
+  getQuizResultSummary,
+} from '../quizResultsUtils';
 import './Quiz.css';
 
 function formatDate(value) {
@@ -12,105 +17,11 @@ function formatDate(value) {
   return date.toLocaleDateString();
 }
 
-function formatDateTime(value) {
-  if (!value) return 'N/A';
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'N/A';
-
-  return date.toLocaleString();
-}
-
 function formatQuizLabel(quiz) {
   const statusLabel =
     !quiz.is_active && quiz.results_saved ? ' (Saved Results)' : '';
 
   return `${quiz.course_name || 'Untitled Course'} - ${quiz.quiz_title || 'Untitled Quiz'}${statusLabel}`;
-}
-
-function getAveragePercentage(attempts) {
-  if (attempts.length === 0) return 0;
-
-  const total = attempts.reduce(
-    (sum, attempt) => sum + Number(attempt.percentage || 0),
-    0
-  );
-
-  return total / attempts.length;
-}
-
-function getMostMissedQuestions(quiz, attempts) {
-  const attemptAnswers = attempts.flatMap(
-    (attempt) => attempt.quiz_attempt_answers || []
-  );
-
-  return [...(quiz?.quiz_questions || [])]
-    .map((question) => {
-      const missedCount = attemptAnswers.filter(
-        (answer) => answer.question_id === question.id && !answer.is_correct
-      ).length;
-      const correctCount = attemptAnswers.filter(
-        (answer) => answer.question_id === question.id && answer.is_correct
-      ).length;
-      const missPercentage =
-        attempts.length > 0 ? (missedCount / attempts.length) * 100 : 0;
-      const correctPercentage =
-        attempts.length > 0 ? (correctCount / attempts.length) * 100 : 0;
-
-      return {
-        id: question.id,
-        questionText: question.question_text,
-        correctCount,
-        correctPercentage,
-        missedCount,
-        missPercentage,
-      };
-    })
-    .sort((left, right) => right.missedCount - left.missedCount);
-}
-
-function downloadCsv(quiz, attempts) {
-  const header = [
-    'Student name',
-    'Email',
-    'Company',
-    'Score',
-    'Total questions',
-    'Percentage',
-    'Passed',
-    'Submitted date/time',
-  ];
-  const rows = attempts.map((attempt) => [
-    attempt.student_name,
-    attempt.student_email,
-    attempt.company || '',
-    attempt.score,
-    attempt.total_questions,
-    Number(attempt.percentage).toFixed(2),
-    attempt.passed ? 'Passed' : 'Failed',
-    formatDateTime(attempt.submitted_at),
-  ]);
-  const csv = [header, ...rows]
-    .map((row) =>
-      row
-        .map((value) => `"${String(value ?? '').replace(/"/g, '""')}"`)
-        .join(',')
-    )
-    .join('\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = window.URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  const fileName = `${quiz.course_name}-${quiz.quiz_title}`
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  link.href = url;
-  link.download = `${fileName || 'quiz-results'}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.URL.revokeObjectURL(url);
 }
 
 async function getCurrentUserId() {
@@ -142,10 +53,8 @@ export default function QuizResults() {
     [quizzes, selectedQuizId]
   );
   const selectedQuizLabel = selectedQuiz ? formatQuizLabel(selectedQuiz) : 'Select Quiz';
-  const averagePercentage = getAveragePercentage(attempts);
-  const passCount = attempts.filter((attempt) => attempt.passed).length;
-  const failCount = attempts.length - passCount;
-  const mostMissedQuestions = getMostMissedQuestions(selectedQuiz, attempts);
+  const resultSummary = getQuizResultSummary(selectedQuiz, attempts);
+  const mostMissedQuestions = resultSummary.mostMissedQuestions;
   const quizIdFromUrl = searchParams.get('quizId') || '';
   const filteredQuizzes = useMemo(() => {
     const searchTerm = appliedQuizSearchTerm.trim().toLowerCase();
@@ -501,15 +410,15 @@ export default function QuizResults() {
                   </div>
                   <div>
                     <span>Class Average</span>
-                    <strong>{averagePercentage.toFixed(2)}%</strong>
+                    <strong>{resultSummary.averagePercentage.toFixed(2)}%</strong>
                   </div>
                   <div>
                     <span>Passed</span>
-                    <strong>{passCount}</strong>
+                    <strong>{resultSummary.passCount}</strong>
                   </div>
                   <div>
                     <span>Failed</span>
-                    <strong>{failCount}</strong>
+                    <strong>{resultSummary.failCount}</strong>
                   </div>
                 </div>
 
@@ -519,7 +428,7 @@ export default function QuizResults() {
                     <button
                       type="button"
                       className="secondary-button"
-                      onClick={() => downloadCsv(selectedQuiz, attempts)}
+                      onClick={() => downloadQuizResultsCsv(selectedQuiz, attempts)}
                       disabled={attempts.length === 0}
                     >
                       Download CSV

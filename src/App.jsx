@@ -176,6 +176,7 @@ function AppShell() {
           <Route path="/" element={<Navigate to="/login" replace />} />
           <Route path="/login" element={<LoginRoute session={session} isAuthLoading={isAuthLoading} />} />
           <Route path="/attendance/session/:sessionId" element={<AttendanceForm />} />
+          <Route path="/quiz" element={<StudentQuiz />} />
           <Route path="/quiz/:quizId" element={<StudentQuiz />} />
           <Route
             path="/instructor-7392"

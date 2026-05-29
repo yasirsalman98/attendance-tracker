@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { QRCodeCanvas } from 'qrcode.react';
 import { supabase } from '../supabaseClient';
+import { getQuizResultSummary } from '../quizResultsUtils';
 import './Quiz.css';
 
 function getTodayDateValue() {
@@ -35,6 +36,24 @@ function formatDuration(minutes) {
     : hourLabel;
 }
 
+function delay(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+const STUDENT_AUTO_SUBMIT_WAIT_MS = 15000;
+
+function isMissingForceSubmitColumns(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return message.includes('force_submit') || message.includes('finalizing');
+}
+
+function isMissingSavedTemplateColumn(error) {
+  return String(error?.message || '').toLowerCase().includes('is_saved_template');
+}
+
 function createChoice(text = '') {
   return {
     id: crypto.randomUUID(),
@@ -56,13 +75,14 @@ function normalizeQuestionType(questionType) {
   return questionType === 'multiple_choice' ? 'multiple_choice' : 'single_choice';
 }
 
-function mapSavedQuizQuestions(savedQuiz) {
+function mapSavedQuizQuestions(savedQuiz, { hideAnswersInEditor = false } = {}) {
   return [...(savedQuiz.quiz_questions || [])]
     .sort((left, right) => left.sort_order - right.sort_order)
     .map((question) => ({
       id: crypto.randomUUID(),
       questionText: question.question_text || '',
       questionType: normalizeQuestionType(question.question_type),
+      ...(hideAnswersInEditor ? { loadedFromSavedQuiz: true } : {}),
       choices: [...(question.quiz_answer_choices || [])]
         .sort((left, right) => left.sort_order - right.sort_order)
         .map((choice) => ({
@@ -71,6 +91,14 @@ function mapSavedQuizQuestions(savedQuiz) {
           isCorrect: Boolean(choice.is_correct),
         })),
     }));
+}
+
+function isReusableSavedQuiz(quiz) {
+  if ('is_saved_template' in quiz) {
+    return quiz.is_saved_template !== false;
+  }
+
+  return quiz.is_active === false && !quiz.results_saved;
 }
 
 async function getCurrentUserId() {
@@ -169,6 +197,7 @@ async function fetchSavedQuizLibrary(params = {}) {
 
 export default function CreateQuiz() {
   const qrCodeRef = useRef(null);
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [courseName, setCourseName] = useState('');
   const [quizTitle, setQuizTitle] = useState('');
@@ -192,26 +221,117 @@ export default function CreateQuiz() {
   const [isLoadingQuizQuestions, setIsLoadingQuizQuestions] = useState(false);
   const [activeQuizzes, setActiveQuizzes] = useState([]);
   const [isLoadingActiveQuizzes, setIsLoadingActiveQuizzes] = useState(false);
-  const [cancelingQuizId, setCancelingQuizId] = useState('');
+  const [liveQuizDetails, setLiveQuizDetails] = useState(null);
+  const [liveAttempts, setLiveAttempts] = useState([]);
+  const [liveResultsError, setLiveResultsError] = useState('');
   const [savingResultsQuizId, setSavingResultsQuizId] = useState('');
-  const [deletingSavedQuizId, setDeletingSavedQuizId] = useState('');
+  const [deletingSessionId, setDeletingSessionId] = useState('');
+  const lastScrolledQuizIdRef = useRef('');
   const quizIdFromUrl = searchParams.get('quizId') || '';
+  const editQuizIdFromUrl = searchParams.get('editQuizId') || '';
+  const isEditingSavedQuiz = Boolean(editQuizIdFromUrl);
 
   const studentQuizLink = useMemo(() => {
     if (!createdQuiz?.id) return '';
 
     return `${window.location.origin}/quiz/${createdQuiz.id}`;
   }, [createdQuiz]);
-  const selectedSavedQuiz = useMemo(
-    () => savedQuizzes.find((quiz) => quiz.id === selectedSavedQuizId) || null,
-    [savedQuizzes, selectedSavedQuizId]
+  const liveQuizForResults = useMemo(
+    () =>
+      liveQuizDetails && createdQuiz?.id === liveQuizDetails.id
+        ? { ...createdQuiz, ...liveQuizDetails }
+        : createdQuiz,
+    [createdQuiz, liveQuizDetails]
+  );
+  const liveResultSummary = useMemo(
+    () => getQuizResultSummary(liveQuizForResults, liveAttempts),
+    [liveAttempts, liveQuizForResults]
+  );
+
+  const loadLiveSessionResults = useCallback(
+    async function loadLiveSessionResults(quizId = createdQuiz?.id) {
+      if (!quizId) {
+        setLiveQuizDetails(null);
+        setLiveAttempts([]);
+        return;
+      }
+
+      setLiveResultsError('');
+
+      try {
+        const userId = await getCurrentUserId();
+        const [quizResponse, attemptsResponse] = await Promise.all([
+          supabase
+            .from('quiz_templates')
+            .select(
+              `
+                id,
+                is_active,
+                results_saved,
+                quiz_questions (
+                  id,
+                  question_text,
+                  sort_order
+                )
+              `
+            )
+            .eq('id', quizId)
+            .eq('owner_user_id', userId)
+            .maybeSingle(),
+          supabase
+            .from('quiz_attempts')
+            .select(
+              `
+                *,
+                quiz_attempt_answers (
+                  id,
+                  question_id,
+                  selected_choice_ids,
+                  is_correct
+                )
+              `
+            )
+            .eq('quiz_template_id', quizId)
+            .order('submitted_at', { ascending: false }),
+        ]);
+
+        if (quizResponse.error) throw quizResponse.error;
+        if (attemptsResponse.error) throw attemptsResponse.error;
+
+        setLiveQuizDetails(quizResponse.data || null);
+        setLiveAttempts(attemptsResponse.data || []);
+
+        if (quizResponse.data) {
+          setCreatedQuiz((currentQuiz) =>
+            currentQuiz?.id === quizId
+              ? {
+                  ...currentQuiz,
+                  is_active: quizResponse.data.is_active,
+                  results_saved: Boolean(quizResponse.data.results_saved),
+                }
+              : currentQuiz
+          );
+
+          if (quizResponse.data.is_active === false) {
+            setActiveQuizzes((currentQuizzes) =>
+              currentQuizzes.filter((activeQuiz) => activeQuiz.id !== quizId)
+            );
+          }
+        }
+      } catch (error) {
+        console.error('Load live quiz results error:', error);
+        setLiveResultsError(error?.message || 'Unable to load live results.');
+        setLiveAttempts([]);
+      }
+    },
+    [createdQuiz?.id]
   );
 
   useEffect(() => {
     let isActive = true;
 
     async function loadCreatedQuiz() {
-      if (!quizIdFromUrl) return;
+      if (!quizIdFromUrl || editQuizIdFromUrl) return;
 
       setErrorMessage('');
       setStatusMessage('Loading saved quiz...');
@@ -247,7 +367,7 @@ export default function CreateQuiz() {
       } else {
         setCreatedQuiz(data);
         setCopied(false);
-        setStatusMessage('Quiz loaded.');
+        setStatusMessage('');
       }
     }
 
@@ -256,17 +376,95 @@ export default function CreateQuiz() {
     return () => {
       isActive = false;
     };
-  }, [quizIdFromUrl]);
+  }, [editQuizIdFromUrl, quizIdFromUrl]);
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadEditingQuiz() {
+      if (!editQuizIdFromUrl) return;
+
+      setCreatedQuiz(null);
+      setCopied(false);
+      setSavedDraftId('');
+      setErrorMessage('');
+      setDraftStatusMessage('');
+      setStatusMessage('Loading saved quiz for editing...');
+
+      try {
+        const { savedQuiz } = await fetchSavedQuizLibrary({
+          quizId: editQuizIdFromUrl,
+        });
+
+        if (!isActive) return;
+
+        if (!savedQuiz) {
+          setStatusMessage('');
+          setErrorMessage('Unable to load that saved quiz.');
+          return;
+        }
+
+        const loadedQuestions = mapSavedQuizQuestions(savedQuiz);
+
+        setCourseName(savedQuiz.course_name || '');
+        setQuizTitle(savedQuiz.quiz_title || '');
+        setQuizDescription(savedQuiz.quiz_description || '');
+        setInstructorName(savedQuiz.instructor_name || '');
+        setClassDate(savedQuiz.class_date || getTodayDateValue());
+        setPassingScore(savedQuiz.passing_score ?? 80);
+        setQuizDurationMinutes(savedQuiz.quiz_duration_minutes || 30);
+        setQuestions(loadedQuestions.length ? loadedQuestions : [createQuestion()]);
+        setStatusMessage('Saved quiz loaded for editing.');
+      } catch (error) {
+        if (!isActive) return;
+
+        console.error('Load edit quiz error:', error);
+        setStatusMessage('');
+        setErrorMessage(error?.message || 'Unable to load that saved quiz.');
+      }
+    }
+
+    loadEditingQuiz();
+
+    return () => {
+      isActive = false;
+    };
+  }, [editQuizIdFromUrl]);
 
   useEffect(() => {
     loadActiveQuizzes();
   }, []);
 
   useEffect(() => {
-    if (!createdQuiz) return;
+    if (!createdQuiz?.id) {
+      lastScrolledQuizIdRef.current = '';
+      return;
+    }
 
+    if (lastScrolledQuizIdRef.current === createdQuiz.id) return;
+
+    lastScrolledQuizIdRef.current = createdQuiz.id;
     window.scrollTo({ top: 0, behavior: 'smooth' });
-  }, [createdQuiz]);
+  }, [createdQuiz?.id]);
+
+  useEffect(() => {
+    if (!createdQuiz?.id || createdQuiz.is_active === false) {
+      return undefined;
+    }
+
+    const initialLoadId = window.setTimeout(() => {
+      loadLiveSessionResults(createdQuiz.id);
+    }, 0);
+
+    const intervalId = window.setInterval(() => {
+      loadLiveSessionResults(createdQuiz.id);
+    }, 3000);
+
+    return () => {
+      window.clearTimeout(initialLoadId);
+      window.clearInterval(intervalId);
+    };
+  }, [createdQuiz?.id, createdQuiz?.is_active, loadLiveSessionResults]);
 
   function updateQuestion(questionId, updates) {
     setQuestions((currentQuestions) =>
@@ -433,7 +631,7 @@ export default function CreateQuiz() {
     try {
       await syncSavedQuizLibrary();
       const libraryData = await fetchSavedQuizLibrary();
-      const quizzes = libraryData.savedQuizzes || [];
+      const quizzes = (libraryData.savedQuizzes || []).filter(isReusableSavedQuiz);
 
       setSavedQuizzes(quizzes);
       setSelectedSavedQuizId((currentId) =>
@@ -477,7 +675,9 @@ export default function CreateQuiz() {
         return;
       }
 
-      const loadedQuestions = mapSavedQuizQuestions(data);
+      const loadedQuestions = mapSavedQuizQuestions(data, {
+        hideAnswersInEditor: true,
+      });
 
       setCourseName(data.course_name || '');
       setQuizTitle(data.quiz_title ? `${data.quiz_title} Copy` : '');
@@ -499,49 +699,6 @@ export default function CreateQuiz() {
     }
 
     setIsLoadingQuizQuestions(false);
-  }
-
-  async function deleteSelectedSavedQuiz() {
-    if (!selectedSavedQuiz) {
-      setErrorMessage('Choose a saved quiz to delete.');
-      return;
-    }
-
-    const quizLabel = `${selectedSavedQuiz.course_name || 'Untitled Course'} - ${
-      selectedSavedQuiz.quiz_title || 'Untitled Quiz'
-    }`;
-    const confirmed = window.confirm(
-      `Delete ${quizLabel}? This will permanently delete this saved quiz and its questions.`
-    );
-
-    if (!confirmed) return;
-
-    setDeletingSavedQuizId(selectedSavedQuiz.id);
-    setErrorMessage('');
-    setStatusMessage('');
-    setDraftStatusMessage('');
-
-    try {
-      const { error } = await supabase
-        .from('quiz_templates')
-        .delete()
-        .eq('id', selectedSavedQuiz.id);
-
-      if (error) throw error;
-
-      const nextSavedQuizzes = savedQuizzes.filter(
-        (quiz) => quiz.id !== selectedSavedQuiz.id
-      );
-
-      setSavedQuizzes(nextSavedQuizzes);
-      setSelectedSavedQuizId(nextSavedQuizzes[0]?.id || '');
-      setStatusMessage('Saved quiz deleted.');
-    } catch (error) {
-      console.error('Delete saved quiz error:', error);
-      setErrorMessage(error?.message || 'Unable to delete saved quiz.');
-    } finally {
-      setDeletingSavedQuizId('');
-    }
   }
 
   function clearLoadedQuizQuestions() {
@@ -596,18 +753,42 @@ export default function CreateQuiz() {
         passing_score: Number(passingScore),
         quiz_duration_minutes: Number(quizDurationMinutes),
         is_active: publish,
+        is_saved_template: !publish,
         owner_user_id: userId,
       };
 
       let quizTemplate;
+      const savePayloadWithoutTemplateFlag = (payload) => {
+        const nextPayload = { ...payload };
+        delete nextPayload.is_saved_template;
+        return nextPayload;
+      };
+      const shouldUpdateDraft = !publish && savedDraftId;
 
-      if (savedDraftId) {
-        const { data: updatedQuizTemplate, error: quizError } = await supabase
+      if (shouldUpdateDraft) {
+        let { data: updatedQuizTemplate, error: quizError } = await supabase
           .from('quiz_templates')
           .update(quizPayload)
           .eq('id', savedDraftId)
+          .eq('owner_user_id', userId)
+          .eq('is_saved_template', true)
           .select()
           .single();
+
+        if (isMissingSavedTemplateColumn(quizError)) {
+          const fallbackResponse = await supabase
+            .from('quiz_templates')
+            .update(savePayloadWithoutTemplateFlag(quizPayload))
+            .eq('id', savedDraftId)
+            .eq('owner_user_id', userId)
+            .eq('is_active', false)
+            .eq('results_saved', false)
+            .select()
+            .single();
+
+          updatedQuizTemplate = fallbackResponse.data;
+          quizError = fallbackResponse.error;
+        }
 
         if (quizError) throw quizError;
 
@@ -620,11 +801,22 @@ export default function CreateQuiz() {
 
         quizTemplate = updatedQuizTemplate;
       } else {
-        const { data: insertedQuizTemplate, error: quizError } = await supabase
+        let { data: insertedQuizTemplate, error: quizError } = await supabase
           .from('quiz_templates')
           .insert(quizPayload)
           .select()
           .single();
+
+        if (isMissingSavedTemplateColumn(quizError)) {
+          const fallbackResponse = await supabase
+            .from('quiz_templates')
+            .insert(savePayloadWithoutTemplateFlag(quizPayload))
+            .select()
+            .single();
+
+          insertedQuizTemplate = fallbackResponse.data;
+          quizError = fallbackResponse.error;
+        }
 
         if (quizError) throw quizError;
 
@@ -661,7 +853,6 @@ export default function CreateQuiz() {
       }
 
       if (publish) {
-        setSavedDraftId('');
         setCreatedQuiz(quizTemplate);
         setSearchParams({ quizId: quizTemplate.id });
         setStatusMessage('Quiz published successfully.');
@@ -674,6 +865,112 @@ export default function CreateQuiz() {
     } catch (error) {
       console.error('Create quiz error:', error);
       setErrorMessage(error?.message || 'Unable to save the quiz.');
+    } finally {
+      setSavingAction('');
+    }
+  }
+
+  async function updateSavedQuiz() {
+    if (!editQuizIdFromUrl) return;
+
+    setCreatedQuiz(null);
+    setCopied(false);
+    setStatusMessage('');
+    setDraftStatusMessage('');
+
+    const validationMessage = validateQuiz();
+
+    if (validationMessage) {
+      setErrorMessage(validationMessage);
+      return;
+    }
+
+    setErrorMessage('');
+    setSavingAction('update');
+
+    try {
+      const userId = await getCurrentUserId();
+
+      const quizPayload = {
+        course_name: courseName.trim(),
+        quiz_title: quizTitle.trim(),
+        quiz_description: quizDescription.trim() || null,
+        instructor_name: instructorName.trim() || null,
+        class_date: classDate || null,
+        passing_score: Number(passingScore),
+        quiz_duration_minutes: Number(quizDurationMinutes),
+        is_saved_template: true,
+        owner_user_id: userId,
+      };
+
+      let { data: updatedQuizTemplate, error: quizError } = await supabase
+        .from('quiz_templates')
+        .update(quizPayload)
+        .eq('id', editQuizIdFromUrl)
+        .eq('owner_user_id', userId)
+        .eq('is_saved_template', true)
+        .select()
+        .single();
+
+      if (isMissingSavedTemplateColumn(quizError)) {
+        const fallbackPayload = { ...quizPayload };
+        delete fallbackPayload.is_saved_template;
+        const fallbackResponse = await supabase
+          .from('quiz_templates')
+          .update(fallbackPayload)
+          .eq('id', editQuizIdFromUrl)
+          .eq('owner_user_id', userId)
+          .eq('is_active', false)
+          .eq('results_saved', false)
+          .select()
+          .single();
+
+        updatedQuizTemplate = fallbackResponse.data;
+        quizError = fallbackResponse.error;
+      }
+
+      if (quizError) throw quizError;
+
+      const { error: deleteQuestionsError } = await supabase
+        .from('quiz_questions')
+        .delete()
+        .eq('quiz_template_id', updatedQuizTemplate.id);
+
+      if (deleteQuestionsError) throw deleteQuestionsError;
+
+      for (let questionIndex = 0; questionIndex < questions.length; questionIndex += 1) {
+        const question = questions[questionIndex];
+        const { data: savedQuestion, error: questionError } = await supabase
+          .from('quiz_questions')
+          .insert({
+            quiz_template_id: updatedQuizTemplate.id,
+            question_text: question.questionText.trim(),
+            question_type: normalizeQuestionType(question.questionType),
+            sort_order: questionIndex,
+          })
+          .select()
+          .single();
+
+        if (questionError) throw questionError;
+
+        const choicesToInsert = question.choices.map((choice, choiceIndex) => ({
+          question_id: savedQuestion.id,
+          choice_text: choice.choiceText.trim(),
+          is_correct: choice.isCorrect,
+          sort_order: choiceIndex,
+        }));
+
+        const { error: choicesError } = await supabase
+          .from('quiz_answer_choices')
+          .insert(choicesToInsert);
+
+        if (choicesError) throw choicesError;
+      }
+
+      setStatusMessage('Saved quiz updated.');
+    } catch (error) {
+      console.error('Update saved quiz error:', error);
+      setErrorMessage(error?.message || 'Unable to update the saved quiz.');
     } finally {
       setSavingAction('');
     }
@@ -720,65 +1017,81 @@ export default function CreateQuiz() {
   }
 
   async function saveQuizResults(quiz) {
-    if (quiz.results_saved) return;
+    if (quiz.results_saved && quiz.is_active === false) {
+      setStatusMessage('Results already saved.');
+      return;
+    }
 
     setSavingResultsQuizId(quiz.id);
     setErrorMessage('');
     setStatusMessage('');
 
     try {
-      const { error } = await supabase
+      const { error: forceSubmitError } = await supabase
         .from('quiz_templates')
-        .update({ results_saved: true })
+        .update({ force_submit: true, finalizing: true })
         .eq('id', quiz.id);
 
-      if (error) throw error;
+      const useResultsSavedFallback = isMissingForceSubmitColumns(forceSubmitError);
 
-      setActiveQuizzes((currentQuizzes) =>
-        currentQuizzes.map((activeQuiz) =>
-          activeQuiz.id === quiz.id
-            ? { ...activeQuiz, results_saved: true }
-            : activeQuiz
-        )
-      );
+      if (forceSubmitError && !useResultsSavedFallback) throw forceSubmitError;
 
-      if (createdQuiz?.id === quiz.id) {
+      if (useResultsSavedFallback) {
+        let { error: fallbackSignalError } = await supabase
+          .from('quiz_templates')
+          .update({ results_saved: true, is_saved_template: false })
+          .eq('id', quiz.id);
+
+        if (isMissingSavedTemplateColumn(fallbackSignalError)) {
+          const fallbackResponse = await supabase
+            .from('quiz_templates')
+            .update({ results_saved: true })
+            .eq('id', quiz.id);
+
+          fallbackSignalError = fallbackResponse.error;
+        }
+
+        if (fallbackSignalError) throw fallbackSignalError;
+      }
+
+      if (!useResultsSavedFallback && createdQuiz?.id === quiz.id) {
         setCreatedQuiz((currentQuiz) =>
-          currentQuiz ? { ...currentQuiz, results_saved: true } : currentQuiz
+          currentQuiz
+            ? { ...currentQuiz, force_submit: true, finalizing: true }
+            : currentQuiz
         );
       }
 
-      setStatusMessage(
-        'Quiz details saved in Quiz Results. Student links and QR codes are not saved there.'
-      );
-    } catch (error) {
-      console.error('Save quiz results error:', error);
-      setErrorMessage(
-        error?.message?.includes('results_saved')
-          ? 'Unable to save quiz results. Run the updated Supabase quiz table SQL first.'
-          : error?.message || 'Unable to save quiz results.'
-      );
-    } finally {
-      setSavingResultsQuizId('');
-    }
-  }
+      await delay(STUDENT_AUTO_SUBMIT_WAIT_MS);
+      await loadLiveSessionResults(quiz.id);
 
-  async function cancelQuizSession(quiz) {
-    const confirmed = window.confirm(
-      `Cancel ${quiz.course_name || 'this course'} - ${quiz.quiz_title || 'this quiz'}? Students will no longer be able to open or submit it. Existing student answers will stay saved.`
-    );
-
-    if (!confirmed) return;
-
-    setCancelingQuizId(quiz.id);
-    setErrorMessage('');
-    setStatusMessage('');
-
-    try {
-      const { error } = await supabase
+      const finalizePayload = useResultsSavedFallback
+        ? {
+            results_saved: true,
+            is_active: false,
+            is_saved_template: false,
+          }
+        : {
+            results_saved: true,
+            is_active: false,
+            is_saved_template: false,
+            finalizing: false,
+          };
+      let { error } = await supabase
         .from('quiz_templates')
-        .update({ is_active: false })
+        .update(finalizePayload)
         .eq('id', quiz.id);
+
+      if (isMissingSavedTemplateColumn(error)) {
+        const fallbackFinalizePayload = { ...finalizePayload };
+        delete fallbackFinalizePayload.is_saved_template;
+        const fallbackResponse = await supabase
+          .from('quiz_templates')
+          .update(fallbackFinalizePayload)
+          .eq('id', quiz.id);
+
+        error = fallbackResponse.error;
+      }
 
       if (error) throw error;
 
@@ -788,18 +1101,29 @@ export default function CreateQuiz() {
 
       if (createdQuiz?.id === quiz.id) {
         setCreatedQuiz((currentQuiz) =>
-          currentQuiz ? { ...currentQuiz, is_active: false } : currentQuiz
+          currentQuiz
+            ? {
+                ...currentQuiz,
+                results_saved: true,
+                is_active: false,
+                is_saved_template: false,
+                finalizing: false,
+              }
+            : currentQuiz
         );
       }
 
-      setStatusMessage(
-        'Quiz session canceled. The student link and QR code are no longer accessible, and existing answers remain saved.'
-      );
+      setStatusMessage('Quiz results saved and session ended.');
     } catch (error) {
-      console.error('Cancel quiz session error:', error);
-      setErrorMessage(error?.message || 'Unable to cancel quiz session.');
+      console.error('Save quiz results error:', error);
+      setErrorMessage(
+        error?.message?.includes('results_saved')
+          ? 'Unable to save quiz results. Run the updated Supabase quiz table SQL first.'
+          : error?.message ||
+              'Unable to save quiz results. Completed submitted attempts were not finalized.'
+      );
     } finally {
-      setCancelingQuizId('');
+      setSavingResultsQuizId('');
     }
   }
 
@@ -808,12 +1132,72 @@ export default function CreateQuiz() {
     setCopied(false);
     setErrorMessage('');
     setDraftStatusMessage('');
-    setStatusMessage('Quiz loaded.');
+    setStatusMessage('');
     setSearchParams({ quizId: quiz.id });
+  }
+
+  function refreshCreateQuizPage() {
+    loadActiveQuizzes();
+
+    if (createdQuiz?.id) {
+      loadLiveSessionResults(createdQuiz.id);
+    }
+  }
+
+  async function deleteCurrentSession() {
+    if (!createdQuiz?.id) return;
+
+    const confirmed = window.confirm(
+      `Delete ${createdQuiz.course_name || 'this course'} - ${
+        createdQuiz.quiz_title || 'this quiz'
+      }? This will permanently delete this quiz session and return you to the Instructor Dashboard.`
+    );
+
+    if (!confirmed) return;
+
+    setDeletingSessionId(createdQuiz.id);
+    setErrorMessage('');
+    setStatusMessage('');
+
+    try {
+      const userId = await getCurrentUserId();
+      let { error } = await supabase
+        .from('quiz_templates')
+        .delete()
+        .eq('id', createdQuiz.id)
+        .eq('owner_user_id', userId)
+        .eq('is_saved_template', false);
+
+      if (isMissingSavedTemplateColumn(error)) {
+        const fallbackResponse = await supabase
+          .from('quiz_templates')
+          .delete()
+          .eq('id', createdQuiz.id)
+          .eq('owner_user_id', userId)
+          .or('is_active.eq.true,results_saved.eq.true');
+
+        error = fallbackResponse.error;
+      }
+
+      if (error) throw error;
+
+      navigate('/instructor-7392', { replace: true });
+    } catch (error) {
+      console.error('Delete quiz session error:', error);
+      setErrorMessage(error?.message || 'Unable to delete this quiz session.');
+    } finally {
+      setDeletingSessionId('');
+    }
   }
 
   function handleSubmit(event) {
     event.preventDefault();
+
+    if (isEditingSavedQuiz) {
+      updateSavedQuiz();
+      return;
+    }
+
     saveQuiz({ publish: true });
   }
 
@@ -844,18 +1228,62 @@ export default function CreateQuiz() {
     <section className="quiz-page">
       <div className="quiz-card">
         <div className="quiz-header">
-          <p className="eyebrow">Instructor Setup</p>
-          <h1>Create Quiz</h1>
+          <p className="eyebrow">
+            {createdQuiz ? 'Instructor Session' : 'Instructor Setup'}
+          </p>
+          <h1>
+            {createdQuiz
+              ? 'Live Quiz Session'
+              : isEditingSavedQuiz
+                ? 'Edit Saved Quiz'
+                : 'Create Quiz'}
+          </h1>
           <p>
-            Build a simple quiz, mark the correct answers, and generate a
-            student link with a QR code.
+            {createdQuiz
+              ? 'Share this quiz with students and monitor results in real time.'
+              : isEditingSavedQuiz
+              ? 'Edit saved quiz questions, answer choices, and correct answers.'
+              : 'Build a simple quiz, mark the correct answers, and generate a student link with a QR code.'}
           </p>
         </div>
 
-        <div className="quiz-nav-row">
-          <Link to="/instructor-7392" className="secondary-link-button">
-            Instructor Dashboard
-          </Link>
+        <div className="quiz-nav-row quizzes-nav-row">
+          <div className="quiz-nav-link-group">
+            {!createdQuiz && (
+              <Link to="/instructor-7392" className="secondary-link-button">
+                Instructor Dashboard
+              </Link>
+            )}
+            {!createdQuiz && isEditingSavedQuiz && (
+              <Link to="/quizzes-7392" className="secondary-link-button">
+                Back to Quizzes
+              </Link>
+            )}
+          </div>
+          {!isEditingSavedQuiz && (
+            <div className="quiz-nav-link-group">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={refreshCreateQuizPage}
+                disabled={isLoadingActiveQuizzes}
+              >
+                {isLoadingActiveQuizzes ? 'Refreshing...' : 'Refresh'}
+              </button>
+              {createdQuiz && (
+                <button
+                  type="button"
+                  className="quiz-danger-button"
+                  onClick={deleteCurrentSession}
+                  disabled={deletingSessionId === createdQuiz.id}
+                >
+                  {deletingSessionId === createdQuiz.id
+                    ? 'Deleting...'
+                    : 'Delete Session'}
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {errorMessage && (
@@ -870,21 +1298,13 @@ export default function CreateQuiz() {
           </div>
         )}
 
-        {activeQuizzes.length > 0 && (
+        {!createdQuiz && !isEditingSavedQuiz && activeQuizzes.length > 0 && (
           <section className="active-quiz-panel">
             <div className="quiz-section-header">
               <div>
                 <h2>Active Quiz Sessions</h2>
                 <p>Published quizzes students can open right now.</p>
               </div>
-              <button
-                type="button"
-                className="secondary-button compact-button"
-                onClick={loadActiveQuizzes}
-                disabled={isLoadingActiveQuizzes}
-              >
-                {isLoadingActiveQuizzes ? 'Refreshing...' : 'Refresh'}
-              </button>
             </div>
 
             <div className="active-quiz-list">
@@ -921,26 +1341,11 @@ export default function CreateQuiz() {
                         event.stopPropagation();
                         saveQuizResults(quiz);
                       }}
-                      disabled={
-                        quiz.results_saved || savingResultsQuizId === quiz.id
-                      }
+                      disabled={savingResultsQuizId === quiz.id}
                     >
-                      {quiz.results_saved
-                        ? 'Results Saved'
-                        : savingResultsQuizId === quiz.id
-                          ? 'Saving...'
-                          : 'Save Quiz Results'}
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-button quiz-cancel-button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        cancelQuizSession(quiz);
-                      }}
-                      disabled={cancelingQuizId === quiz.id}
-                    >
-                      {cancelingQuizId === quiz.id ? 'Canceling...' : 'Cancel Session'}
+                      {savingResultsQuizId === quiz.id
+                        ? 'Saving Results...'
+                        : 'Save Quiz Results'}
                     </button>
                   </div>
                 </div>
@@ -951,7 +1356,8 @@ export default function CreateQuiz() {
 
         {!createdQuiz ? (
           <form className="quiz-form" onSubmit={handleSubmit}>
-            <section className="load-quiz-panel">
+            {!isEditingSavedQuiz && (
+              <section className="load-quiz-panel">
               <div>
                 <h2>Load Saved Quiz Questions</h2>
                 <p>
@@ -991,42 +1397,6 @@ export default function CreateQuiz() {
 
                   <button
                     type="button"
-                    className="quiz-delete-icon-button saved-quiz-delete-button"
-                    aria-label={
-                      selectedSavedQuiz
-                        ? `Delete ${selectedSavedQuiz.course_name || 'Untitled Course'} - ${
-                            selectedSavedQuiz.quiz_title || 'Untitled Quiz'
-                          }`
-                        : 'Delete saved quiz'
-                    }
-                    title="Delete saved quiz"
-                    onClick={deleteSelectedSavedQuiz}
-                    disabled={
-                      !selectedSavedQuizId ||
-                      deletingSavedQuizId === selectedSavedQuizId
-                    }
-                  >
-                    <svg
-                      aria-hidden="true"
-                      viewBox="0 0 24 24"
-                      width="18"
-                      height="18"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <path d="M3 6h18" />
-                      <path d="M8 6V4h8v2" />
-                      <path d="M19 6l-1 14H6L5 6" />
-                      <path d="M10 11v5" />
-                      <path d="M14 11v5" />
-                    </svg>
-                  </button>
-
-                  <button
-                    type="button"
                     className="secondary-button"
                     onClick={loadSelectedQuizQuestions}
                     disabled={!selectedSavedQuizId || isLoadingQuizQuestions}
@@ -1043,7 +1413,8 @@ export default function CreateQuiz() {
                   </button>
                 </div>
               )}
-            </section>
+              </section>
+            )}
 
             <div className="form-row">
               <div className="form-group">
@@ -1134,131 +1505,153 @@ export default function CreateQuiz() {
               </div>
 
               <div className="question-list">
-                {questions.map((question, questionIndex) => (
-                  <section className="question-card" key={question.id}>
-                    <div className="question-card-header">
-                      <h3>Question {questionIndex + 1}</h3>
-                      <button
-                        type="button"
-                        className="secondary-button compact-button"
-                        onClick={() => removeQuestion(question.id)}
-                        disabled={questions.length === 1}
-                      >
-                        Remove
-                      </button>
-                    </div>
+                {questions.map((question, questionIndex) => {
+                  const hideAnswerChoiceEditor = Boolean(question.loadedFromSavedQuiz);
 
-                    <div className="form-group">
-                      <label htmlFor={`question-${question.id}`}>Question Text *</label>
-                      <textarea
-                        id={`question-${question.id}`}
-                        value={question.questionText}
-                        onChange={(event) =>
-                          updateQuestion(question.id, {
-                            questionText: event.target.value,
-                          })
-                        }
-                        rows={3}
-                      />
-                    </div>
+                  return (
+                    <section className="question-card" key={question.id}>
+                      <div className="question-card-header">
+                        <h3>Question {questionIndex + 1}</h3>
+                        <button
+                          type="button"
+                          className="secondary-button compact-button"
+                          onClick={() => removeQuestion(question.id)}
+                          disabled={questions.length === 1}
+                        >
+                          Remove
+                        </button>
+                      </div>
 
-                    <fieldset className="choice-fieldset">
-                      <legend>Question Type</legend>
-                      <label className="inline-choice">
-                        <input
-                          type="radio"
-                          name={`question-type-${question.id}`}
-                          value="single_choice"
-                          checked={question.questionType === 'single_choice'}
+                      <div className="form-group">
+                        <label htmlFor={`question-${question.id}`}>Question Text *</label>
+                        <textarea
+                          id={`question-${question.id}`}
+                          value={question.questionText}
                           onChange={(event) =>
-                            updateQuestionType(question.id, event.target.value)
+                            updateQuestion(question.id, {
+                              questionText: event.target.value,
+                            })
                           }
+                          rows={3}
                         />
-                        Single answer
-                      </label>
-                      <label className="inline-choice">
-                        <input
-                          type="radio"
-                          name={`question-type-${question.id}`}
-                          value="multiple_choice"
-                          checked={question.questionType === 'multiple_choice'}
-                          onChange={(event) =>
-                            updateQuestionType(question.id, event.target.value)
-                          }
-                        />
-                        Multiple answers
-                      </label>
-                    </fieldset>
+                      </div>
 
-                    <div className="answer-choice-list">
-                      {question.choices.map((choice, choiceIndex) => (
-                        <div className="answer-choice-row" key={choice.id}>
-                          <label className="correct-choice-control">
-                            <input
-                              type={
-                                question.questionType === 'single_choice'
-                                  ? 'radio'
-                                  : 'checkbox'
-                              }
-                              name={`correct-choice-${question.id}`}
-                              checked={choice.isCorrect}
-                              onChange={() => toggleCorrectChoice(question.id, choice.id)}
-                            />
-                            Correct
-                          </label>
+                      {!hideAnswerChoiceEditor && (
+                        <>
+                          <fieldset className="choice-fieldset">
+                            <legend>Question Type</legend>
+                            <label className="inline-choice">
+                              <input
+                                type="radio"
+                                name={`question-type-${question.id}`}
+                                value="single_choice"
+                                checked={question.questionType === 'single_choice'}
+                                onChange={(event) =>
+                                  updateQuestionType(question.id, event.target.value)
+                                }
+                              />
+                              Single answer
+                            </label>
+                            <label className="inline-choice">
+                              <input
+                                type="radio"
+                                name={`question-type-${question.id}`}
+                                value="multiple_choice"
+                                checked={question.questionType === 'multiple_choice'}
+                                onChange={(event) =>
+                                  updateQuestionType(question.id, event.target.value)
+                                }
+                              />
+                              Multiple answers
+                            </label>
+                          </fieldset>
 
-                          <input
-                            type="text"
-                            value={choice.choiceText}
-                            onChange={(event) =>
-                              updateChoice(question.id, choice.id, {
-                                choiceText: event.target.value,
-                              })
-                            }
-                            placeholder={`Answer choice ${choiceIndex + 1}`}
-                          />
+                          <div className="answer-choice-list">
+                            {question.choices.map((choice, choiceIndex) => (
+                              <div className="answer-choice-row" key={choice.id}>
+                                <label className="correct-choice-control">
+                                  <input
+                                    type={
+                                      question.questionType === 'single_choice'
+                                        ? 'radio'
+                                        : 'checkbox'
+                                    }
+                                    name={`correct-choice-${question.id}`}
+                                    checked={choice.isCorrect}
+                                    onChange={() =>
+                                      toggleCorrectChoice(question.id, choice.id)
+                                    }
+                                  />
+                                  Correct
+                                </label>
+
+                                <input
+                                  type="text"
+                                  value={choice.choiceText}
+                                  onChange={(event) =>
+                                    updateChoice(question.id, choice.id, {
+                                      choiceText: event.target.value,
+                                    })
+                                  }
+                                  placeholder={`Answer choice ${choiceIndex + 1}`}
+                                />
+
+                                <button
+                                  type="button"
+                                  className="secondary-button compact-button"
+                                  onClick={() => removeChoice(question.id, choice.id)}
+                                  disabled={question.choices.length <= 2}
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            ))}
+                          </div>
 
                           <button
                             type="button"
                             className="secondary-button compact-button"
-                            onClick={() => removeChoice(question.id, choice.id)}
-                            disabled={question.choices.length <= 2}
+                            onClick={() => addChoice(question.id)}
                           >
-                            Remove
+                            Add Answer Choice
                           </button>
-                        </div>
-                      ))}
-                    </div>
-
-                    <button
-                      type="button"
-                      className="secondary-button compact-button"
-                      onClick={() => addChoice(question.id)}
-                    >
-                      Add Answer Choice
-                    </button>
-                  </section>
-                ))}
+                        </>
+                      )}
+                    </section>
+                  );
+                })}
               </div>
             </div>
 
             <div className="quiz-save-actions">
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => saveQuiz({ publish: false })}
-                disabled={Boolean(savingAction)}
-              >
-                {savingAction === 'draft' ? 'Saving Draft...' : 'Save as Draft'}
-              </button>
+              {isEditingSavedQuiz ? (
+                <button
+                  className="primary-button"
+                  type="submit"
+                  disabled={Boolean(savingAction)}
+                >
+                  {savingAction === 'update' ? 'Updating...' : 'Update Quiz'}
+                </button>
+              ) : (
+                <>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => saveQuiz({ publish: false })}
+                    disabled={Boolean(savingAction)}
+                  >
+                    {savingAction === 'draft' ? 'Saving Draft...' : 'Save as Draft'}
+                  </button>
 
-              <button
-                className="primary-button"
-                type="submit"
-                disabled={Boolean(savingAction)}
-              >
-                {savingAction === 'publish' ? 'Publishing...' : 'Save & Publish'}
-              </button>
+                  <button
+                    className="primary-button"
+                    type="submit"
+                    disabled={Boolean(savingAction)}
+                  >
+                    {savingAction === 'publish' ? 'Publishing...' : 'Publish'}
+                  </button>
+                </>
+              )}
             </div>
 
             {draftStatusMessage && (
@@ -1268,17 +1661,28 @@ export default function CreateQuiz() {
             )}
           </form>
         ) : (
-          <section className="quiz-created">
-            <div className="quiz-summary">
-              <h2>Quiz Details</h2>
-              <dl>
+          <section className="quiz-created live-session-layout">
+            <section className="live-session-card live-status-card">
+              <div className="live-status-heading">
+                <span
+                  className={
+                    createdQuiz.is_active === false
+                      ? 'live-status-pill is-ended'
+                      : 'live-status-pill'
+                  }
+                >
+                  {createdQuiz.is_active === false ? 'Ended' : 'Live'}
+                </span>
                 <div>
-                  <dt>Course</dt>
-                  <dd>{createdQuiz.course_name}</dd>
+                  <h2>{createdQuiz.course_name || 'Untitled Course'}</h2>
+                  <p>{createdQuiz.quiz_title || 'Untitled Quiz'}</p>
                 </div>
+              </div>
+
+              <dl className="live-session-detail-grid">
                 <div>
-                  <dt>Quiz</dt>
-                  <dd>{createdQuiz.quiz_title}</dd>
+                  <dt>Class Date</dt>
+                  <dd>{formatDate(createdQuiz.class_date)}</dd>
                 </div>
                 <div>
                   <dt>Passing Score</dt>
@@ -1289,79 +1693,156 @@ export default function CreateQuiz() {
                   <dd>{formatDuration(createdQuiz.quiz_duration_minutes || 30)}</dd>
                 </div>
               </dl>
-            </div>
+            </section>
 
-            {createdQuiz.is_active === false ? (
-              <div className="alert alert-error" role="status">
-                This quiz session is canceled. The student link and QR code are no longer accessible.
+            <section className="live-session-card">
+              <div className="live-card-header">
+                <h2>Student Access</h2>
               </div>
-            ) : (
-              <>
-                <div className="student-link-box">
-                  <label htmlFor="studentQuizLink">Student Quiz Link</label>
-                  <div className="copy-row">
-                    <input id="studentQuizLink" type="text" value={studentQuizLink} readOnly />
-                    <button type="button" onClick={handleCopyLink}>
-                      {copied ? 'Copied' : 'Copy Quiz Link'}
-                    </button>
+
+              {createdQuiz.is_active === false ? (
+                <div className="alert alert-error" role="status">
+                  This quiz session has ended. The student link and QR code are no longer accessible.
+                </div>
+              ) : (
+                <div className="student-access-grid">
+                  <div className="student-link-box">
+                    <label htmlFor="studentQuizLink">Student Quiz URL</label>
+                    <div className="copy-row">
+                      <input
+                        id="studentQuizLink"
+                        type="text"
+                        value={studentQuizLink}
+                        readOnly
+                      />
+                      <button type="button" onClick={handleCopyLink}>
+                        {copied ? 'Copied' : 'Copy Link'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="student-access-qr">
+                    <div className="qr-code-image" ref={qrCodeRef}>
+                      <QRCodeCanvas
+                        value={studentQuizLink}
+                        size={220}
+                        level="M"
+                        marginSize={4}
+                      />
+                    </div>
+                    <div className="student-access-actions">
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={handleDownloadQrCode}
+                      >
+                        Download QR Code
+                      </button>
+                      <a
+                        className="primary-button link-button"
+                        href={studentQuizLink}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open Student Quiz
+                      </a>
+                    </div>
                   </div>
                 </div>
-
-                <div className="qr-code-box">
-                  <div className="qr-code-image" ref={qrCodeRef}>
-                    <QRCodeCanvas value={studentQuizLink} size={220} level="M" marginSize={4} />
-                  </div>
-                  <div className="qr-code-copy">
-                    <h2>Student QR Code</h2>
-                    <p>Students can scan this QR code to open the quiz.</p>
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={handleDownloadQrCode}
-                    >
-                      Download QR Code
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
-
-            <div className="action-row">
-              {createdQuiz.is_active !== false && (
-                <a className="primary-button link-button" href={studentQuizLink}>
-                  Open Student Quiz
-                </a>
               )}
-              <button
-                type="button"
-                className="secondary-button quiz-save-results-button"
-                onClick={() => saveQuizResults(createdQuiz)}
-                disabled={
-                  createdQuiz.results_saved ||
-                  savingResultsQuizId === createdQuiz.id
-                }
-              >
-                {createdQuiz.results_saved
-                  ? 'Results Saved'
-                  : savingResultsQuizId === createdQuiz.id
-                    ? 'Saving...'
-                    : 'Save Quiz Results'}
-              </button>
+            </section>
+
+            <section className="live-session-card">
+              <div className="live-card-header">
+                <h2>Live Results</h2>
+              </div>
+
+              {liveResultsError && (
+                <div className="alert alert-error" role="alert">
+                  {liveResultsError}
+                </div>
+              )}
+
+              {liveResultSummary.totalAttempts === 0 ? (
+                <p className="muted live-results-empty">
+                  Results will appear after students submit this quiz.
+                </p>
+              ) : (
+                <>
+                  <div className="live-results-grid">
+                    <div>
+                      <span>Submitted / Total Attempts</span>
+                      <strong>
+                        {liveResultSummary.totalAttempts} /{' '}
+                        {liveResultSummary.totalAttempts}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Class Average</span>
+                      <strong>
+                        {liveResultSummary.averagePercentage.toFixed(2)}%
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Passed</span>
+                      <strong>{liveResultSummary.passCount}</strong>
+                    </div>
+                    <div>
+                      <span>Failed</span>
+                      <strong>{liveResultSummary.failCount}</strong>
+                    </div>
+                  </div>
+
+                  <div className="most-missed-card">
+                    <span>Most Missed Question</span>
+                    {liveResultSummary.mostMissedQuestion ? (
+                      <>
+                        <strong>
+                          {liveResultSummary.mostMissedQuestion.questionText}
+                        </strong>
+                        <p>
+                          {liveResultSummary.mostMissedQuestion.missedCount} missed (
+                          {liveResultSummary.mostMissedQuestion.missPercentage.toFixed(2)}
+                          %)
+                        </p>
+                      </>
+                    ) : (
+                      <p>No questions found for this quiz.</p>
+                    )}
+                  </div>
+                </>
+              )}
+            </section>
+
+            <div className="live-results-actions">
               <Link
                 className="secondary-link-button"
                 to={`/quiz-results-7392?quizId=${createdQuiz.id}`}
               >
-                View Quiz Results
+                View Full Results
               </Link>
-              {createdQuiz.is_active !== false && (
-                <button
-                  type="button"
-                  className="secondary-button quiz-cancel-button"
-                  onClick={() => cancelQuizSession(createdQuiz)}
-                  disabled={cancelingQuizId === createdQuiz.id}
-                >
-                  {cancelingQuizId === createdQuiz.id ? 'Canceling...' : 'Cancel Session'}
-                </button>
+              {createdQuiz.results_saved || createdQuiz.is_active === false ? (
+                <p className="live-results-saved-note">
+                  {createdQuiz.results_saved
+                    ? 'Results saved. This session is ended.'
+                    : 'This session is ended.'}
+                </p>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="secondary-button quiz-save-results-button"
+                    onClick={() => saveQuizResults(createdQuiz)}
+                    disabled={savingResultsQuizId === createdQuiz.id}
+                  >
+                    {savingResultsQuizId === createdQuiz.id
+                      ? 'Saving Results...'
+                      : 'Save Quiz Results'}
+                  </button>
+                  <p className="live-results-action-note">
+                    Saves results and closes the student quiz link.
+                  </p>
+                </>
               )}
             </div>
           </section>

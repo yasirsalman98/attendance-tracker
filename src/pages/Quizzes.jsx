@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import './Quiz.css';
@@ -37,14 +37,150 @@ async function getCurrentUserId() {
   return data.user.id;
 }
 
+async function getCurrentAccessToken() {
+  const { data, error } = await supabase.auth.getSession();
+  const accessToken = data?.session?.access_token;
+
+  if (error || !accessToken) {
+    throw new Error('Please sign in again.');
+  }
+
+  return accessToken;
+}
+
+function isLocalHost() {
+  return (
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1'
+  );
+}
+
+function getSavedQuizLibraryUrl() {
+  if (isLocalHost()) {
+    return 'http://localhost:3001/.netlify/functions/saved-quiz-library';
+  }
+
+  return '/.netlify/functions/saved-quiz-library';
+}
+
+async function readFunctionJson(response, fallbackMessage) {
+  const responseText = await response.text();
+  let responseData = null;
+
+  if (responseText.trim()) {
+    try {
+      responseData = JSON.parse(responseText);
+    } catch {
+      responseData = null;
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      responseData?.error ||
+        (responseText && !responseText.trim().startsWith('<') ? responseText : '') ||
+        `${fallbackMessage} (${response.status} ${response.statusText})`
+    );
+  }
+
+  return responseData || {};
+}
+
+async function syncSavedQuizLibrary() {
+  const accessToken = await getCurrentAccessToken();
+
+  const response = await fetch(getSavedQuizLibraryUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  const responseData = await readFunctionJson(
+    response,
+    'Unable to sync saved quiz library.'
+  );
+
+  return responseData?.importedQuizCount || 0;
+}
+
+async function fetchSavedQuizLibrary() {
+  const accessToken = await getCurrentAccessToken();
+  const response = await fetch(getSavedQuizLibraryUrl(), {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  return readFunctionJson(response, 'Unable to load saved quiz library.');
+}
+
+function getSavedQuizOptionLabel(quiz) {
+  return `${quiz.course_name || 'Untitled Course'} - ${
+    quiz.quiz_title || 'Untitled Quiz'
+  }${quiz.is_active ? '' : ' (Draft)'}`;
+}
+
+function isOriginalSavedQuizTemplate(quiz) {
+  const quizTitle = (quiz.quiz_title || '').trim();
+  const isSavedTemplate =
+    'is_saved_template' in quiz
+      ? quiz.is_saved_template !== false
+      : quiz.is_active === false && !quiz.results_saved;
+
+  return isSavedTemplate && !/\bcopy$/i.test(quizTitle);
+}
+
+function isMissingSavedTemplateColumn(error) {
+  return String(error?.message || '').toLowerCase().includes('is_saved_template');
+}
+
 export default function Quizzes() {
+  const [allSavedQuizzes, setAllSavedQuizzes] = useState([]);
+  const [savedQuizzes, setSavedQuizzes] = useState([]);
+  const [selectedSavedQuizId, setSelectedSavedQuizId] = useState('');
+  const [selectedCopiedQuizId, setSelectedCopiedQuizId] = useState('');
+  const [isLoadingSavedQuizzes, setIsLoadingSavedQuizzes] = useState(false);
+  const [deletingCopiedQuizId, setDeletingCopiedQuizId] = useState('');
   const [savedResultQuizzes, setSavedResultQuizzes] = useState([]);
   const [isLoadingSavedResults, setIsLoadingSavedResults] = useState(false);
   const [deletingSavedResultQuizId, setDeletingSavedResultQuizId] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
 
-  async function loadSavedResultQuizzes() {
+  const loadSavedQuizzes = useCallback(async function loadSavedQuizzes() {
+    setIsLoadingSavedQuizzes(true);
+    setErrorMessage('');
+
+    try {
+      await syncSavedQuizLibrary();
+      const libraryData = await fetchSavedQuizLibrary();
+      const allQuizzes = libraryData.savedQuizzes || [];
+      const quizzes = allQuizzes.filter(isOriginalSavedQuizTemplate);
+
+      setAllSavedQuizzes(allQuizzes);
+      setSavedQuizzes(quizzes);
+      setSelectedSavedQuizId((currentId) =>
+        quizzes.some((quiz) => quiz.id === currentId)
+          ? currentId
+          : quizzes[0]?.id || ''
+      );
+      setSelectedCopiedQuizId((currentId) =>
+        allQuizzes.some((quiz) => quiz.id === currentId) ? currentId : ''
+      );
+    } catch (error) {
+      console.error('Load saved quizzes error:', error);
+      setAllSavedQuizzes([]);
+      setSavedQuizzes([]);
+      setSelectedSavedQuizId('');
+      setSelectedCopiedQuizId('');
+      setErrorMessage(error?.message || 'Unable to load saved quizzes.');
+    } finally {
+      setIsLoadingSavedQuizzes(false);
+    }
+  }, []);
+
+  const loadSavedResultQuizzes = useCallback(async function loadSavedResultQuizzes() {
     setIsLoadingSavedResults(true);
     setErrorMessage('');
 
@@ -66,7 +202,7 @@ export default function Quizzes() {
     } finally {
       setIsLoadingSavedResults(false);
     }
-  }
+  }, []);
 
   async function deleteSavedQuizResult(quiz) {
     const quizLabel = `${quiz.course_name || 'Untitled Course'} - ${
@@ -83,10 +219,13 @@ export default function Quizzes() {
     setStatusMessage('');
 
     try {
+      const userId = await getCurrentUserId();
       const { error } = await supabase
         .from('quiz_templates')
         .update({ results_saved: false })
-        .eq('id', quiz.id);
+        .eq('id', quiz.id)
+        .eq('owner_user_id', userId)
+        .eq('results_saved', true);
 
       if (error) throw error;
 
@@ -102,9 +241,84 @@ export default function Quizzes() {
     }
   }
 
-  useEffect(() => {
+  async function deleteSelectedCopiedQuiz() {
+    const selectedQuiz = allSavedQuizzes.find(
+      (quiz) => quiz.id === selectedCopiedQuizId
+    );
+
+    if (!selectedQuiz) {
+      setErrorMessage('Choose a saved quiz to delete.');
+      return;
+    }
+
+    const quizLabel = getSavedQuizOptionLabel(selectedQuiz);
+    const confirmed = window.confirm(
+      `Delete ${quizLabel}? This will permanently delete this saved quiz.`
+    );
+
+    if (!confirmed) return;
+
+    setDeletingCopiedQuizId(selectedQuiz.id);
+    setErrorMessage('');
+    setStatusMessage('');
+
+    try {
+      const userId = await getCurrentUserId();
+      let { error } = await supabase
+        .from('quiz_templates')
+        .delete()
+        .eq('id', selectedQuiz.id)
+        .eq('owner_user_id', userId)
+        .eq('is_saved_template', true);
+
+      if (isMissingSavedTemplateColumn(error)) {
+        const fallbackResponse = await supabase
+          .from('quiz_templates')
+          .delete()
+          .eq('id', selectedQuiz.id)
+          .eq('owner_user_id', userId)
+          .eq('is_active', false)
+          .eq('results_saved', false);
+
+        error = fallbackResponse.error;
+      }
+
+      if (error) throw error;
+
+      const nextAllSavedQuizzes = allSavedQuizzes.filter(
+        (quiz) => quiz.id !== selectedQuiz.id
+      );
+      const nextSavedQuizzes = nextAllSavedQuizzes.filter(
+        isOriginalSavedQuizTemplate
+      );
+
+      setAllSavedQuizzes(nextAllSavedQuizzes);
+      setSavedQuizzes(nextSavedQuizzes);
+      setSelectedSavedQuizId((currentId) =>
+        nextSavedQuizzes.some((quiz) => quiz.id === currentId)
+          ? currentId
+          : nextSavedQuizzes[0]?.id || ''
+      );
+      setSelectedCopiedQuizId('');
+      setStatusMessage('Saved quiz deleted.');
+    } catch (error) {
+      console.error('Delete copied quiz error:', error);
+      setErrorMessage(error?.message || 'Unable to delete saved quiz.');
+    } finally {
+      setDeletingCopiedQuizId('');
+    }
+  }
+
+  const refreshQuizPage = useCallback(function refreshQuizPage() {
+    loadSavedQuizzes();
     loadSavedResultQuizzes();
-  }, []);
+  }, [loadSavedQuizzes, loadSavedResultQuizzes]);
+
+  useEffect(() => {
+    Promise.resolve().then(() => {
+      refreshQuizPage();
+    });
+  }, [refreshQuizPage]);
 
   return (
     <section className="quiz-page">
@@ -115,10 +329,20 @@ export default function Quizzes() {
           <p>Review saved quiz results or create a new quiz session.</p>
         </div>
 
-        <div className="quiz-nav-row">
+        <div className="quiz-nav-row quizzes-nav-row">
           <Link to="/create-quiz-7392" className="primary-button link-button">
             Create Quiz
           </Link>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={refreshQuizPage}
+            disabled={isLoadingSavedQuizzes || isLoadingSavedResults}
+          >
+            {isLoadingSavedQuizzes || isLoadingSavedResults
+              ? 'Refreshing...'
+              : 'Refresh'}
+          </button>
         </div>
 
         {errorMessage && (
@@ -133,20 +357,82 @@ export default function Quizzes() {
           </div>
         )}
 
+        <section className="active-quiz-panel saved-quizzes-panel">
+          <div className="quiz-section-header">
+            <div>
+              <h2>Saved Quizzes</h2>
+              <p>Edit saved quiz questions and answers.</p>
+            </div>
+          </div>
+
+          {isLoadingSavedQuizzes ? (
+            <p className="muted">Loading saved quizzes...</p>
+          ) : savedQuizzes.length === 0 ? (
+            <p className="muted">No saved quizzes found.</p>
+          ) : (
+            <>
+              <div className="saved-quiz-edit-row">
+                <select
+                  value={selectedSavedQuizId}
+                  onChange={(event) => setSelectedSavedQuizId(event.target.value)}
+                  aria-label="Saved quizzes"
+                >
+                  {savedQuizzes.map((quiz) => (
+                    <option key={quiz.id} value={quiz.id}>
+                      {getSavedQuizOptionLabel(quiz)}
+                    </option>
+                  ))}
+                </select>
+
+                <Link
+                  className="primary-button link-button saved-quiz-edit-button"
+                  to={`/create-quiz-7392?editQuizId=${selectedSavedQuizId}`}
+                >
+                  Edit Quiz
+                </Link>
+              </div>
+            </>
+          )}
+
+          {!isLoadingSavedQuizzes && allSavedQuizzes.length > 0 && (
+            <div className="saved-quiz-delete-row">
+              <select
+                value={selectedCopiedQuizId}
+                onChange={(event) => setSelectedCopiedQuizId(event.target.value)}
+                aria-label="Saved quizzes to delete"
+              >
+                <option value="">Select quiz</option>
+                {allSavedQuizzes.map((quiz) => (
+                  <option key={quiz.id} value={quiz.id}>
+                    {getSavedQuizOptionLabel(quiz)}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                className="quiz-danger-button saved-quiz-delete-action"
+                onClick={deleteSelectedCopiedQuiz}
+                disabled={
+                  !selectedCopiedQuizId ||
+                  deletingCopiedQuizId === selectedCopiedQuizId
+                }
+              >
+                {selectedCopiedQuizId &&
+                deletingCopiedQuizId === selectedCopiedQuizId
+                  ? 'Deleting...'
+                  : 'Delete Quiz'}
+              </button>
+            </div>
+          )}
+        </section>
+
         <section className="active-quiz-panel saved-results-panel">
           <div className="quiz-section-header">
             <div>
               <h2>Saved Quiz Results</h2>
               <p>Quizzes saved for results review.</p>
             </div>
-            <button
-              type="button"
-              className="secondary-button compact-button"
-              onClick={loadSavedResultQuizzes}
-              disabled={isLoadingSavedResults}
-            >
-              {isLoadingSavedResults ? 'Refreshing...' : 'Refresh'}
-            </button>
           </div>
 
           {isLoadingSavedResults ? (
@@ -166,7 +452,6 @@ export default function Quizzes() {
                       <span>{formatDate(quiz.class_date)}</span>
                       <span>Passing: {quiz.passing_score}%</span>
                       <span>Time: {formatDuration(quiz.quiz_duration_minutes || 30)}</span>
-                      <span>{quiz.is_active ? 'Active' : 'Canceled'}</span>
                     </div>
                   </div>
                   <div className="active-quiz-actions">

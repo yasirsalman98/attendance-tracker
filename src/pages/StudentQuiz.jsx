@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import jsPDF from 'jspdf';
 import { supabase } from '../supabaseClient';
@@ -50,6 +50,34 @@ function getStoredQuizStartKey(quizId) {
   return `excourse_quiz_started_${quizId}`;
 }
 
+function getStoredSubmissionKey(quizId) {
+  return `excourse_quiz_submission_key_${quizId}`;
+}
+
+function getOrCreateSubmissionKey(quizId) {
+  const storageKey = getStoredSubmissionKey(quizId);
+  let submissionKey = window.localStorage.getItem(storageKey);
+
+  if (!submissionKey) {
+    submissionKey = crypto.randomUUID();
+    window.localStorage.setItem(storageKey, submissionKey);
+  }
+
+  return submissionKey;
+}
+
+function isMissingSubmissionKeyColumn(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return message.includes('submission_key') && message.includes('schema cache');
+}
+
+function isMissingForceSubmitColumns(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return message.includes('force_submit') || message.includes('finalizing');
+}
+
 function formatRemainingTime(totalSeconds) {
   const seconds = Math.max(0, Number(totalSeconds || 0));
   const hours = Math.floor(seconds / 3600);
@@ -63,9 +91,39 @@ function formatRemainingTime(totalSeconds) {
     : `${paddedMinutes}:${paddedSeconds}`;
 }
 
+function getQuizRemainingSeconds(quiz) {
+  if (!quiz?.created_at) return null;
+
+  const startedAt = new Date(quiz.created_at).getTime();
+  const durationMinutes = Number(quiz.quiz_duration_minutes || 30);
+
+  if (
+    Number.isNaN(startedAt) ||
+    !Number.isFinite(durationMinutes) ||
+    durationMinutes <= 0
+  ) {
+    return null;
+  }
+
+  const deadline = startedAt + durationMinutes * 60 * 1000;
+
+  return Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+}
+
+async function finalizeExpiredQuizSession(quizId) {
+  const { error } = await supabase.rpc('finalize_expired_quiz_session', {
+    p_quiz_id: quizId,
+  });
+
+  if (error) {
+    console.warn('Unable to finalize expired quiz session:', error);
+  }
+}
+
 export default function StudentQuiz() {
-  const { quizId } = useParams();
+  const { quizId: quizIdFromPath } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
+  const quizId = quizIdFromPath || searchParams.get('quizId') || '';
   const [quiz, setQuiz] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -76,8 +134,12 @@ export default function StudentQuiz() {
   const [status, setStatus] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [result, setResult] = useState(null);
+  const [resultNotice, setResultNotice] = useState('');
   const [remainingSeconds, setRemainingSeconds] = useState(null);
   const [isTimeExpired, setIsTimeExpired] = useState(false);
+  const [isSessionEnded, setIsSessionEnded] = useState(false);
+  const submissionInFlightRef = useRef(false);
+  const forcedSubmitTriggeredRef = useRef(false);
   const attemptIdFromUrl = searchParams.get('attemptId') || '';
 
   const orderedQuestions = useMemo(() => {
@@ -111,6 +173,8 @@ export default function StudentQuiz() {
           passing_score,
           quiz_duration_minutes,
           is_active,
+          results_saved,
+          created_at,
           quiz_questions (
             id,
             question_text,
@@ -128,10 +192,19 @@ export default function StudentQuiz() {
 
       if (!isActive) return;
 
-      if (error || !data || !data.is_active) {
+      const isExpired = data ? getQuizRemainingSeconds(data) === 0 : false;
+
+      if (error || !data || !data.is_active || data.results_saved || isExpired) {
         console.error('Load quiz error:', error);
+        if (data?.id && isExpired) {
+          finalizeExpiredQuizSession(data.id);
+        }
         setQuiz(null);
-        setLoadError('Invalid quiz link. Please use the link provided by your instructor.');
+        setLoadError(
+          data?.results_saved || data?.is_active === false || isExpired
+            ? 'This quiz session has ended.'
+            : 'Invalid quiz link. Please use the link provided by your instructor.'
+        );
       } else {
         const sortedQuiz = {
           ...data,
@@ -144,6 +217,7 @@ export default function StudentQuiz() {
         };
 
         setQuiz(sortedQuiz);
+        setIsSessionEnded(false);
       }
 
       setIsLoading(false);
@@ -175,46 +249,6 @@ export default function StudentQuiz() {
     }
   }, [attemptIdFromUrl, quizId]);
 
-  useEffect(() => {
-    if (!quiz?.id || result) return undefined;
-
-    const parsedLimitMinutes = Number(quiz.quiz_duration_minutes || 30);
-    const limitMinutes =
-      Number.isFinite(parsedLimitMinutes) && parsedLimitMinutes > 0
-        ? parsedLimitMinutes
-        : 30;
-
-    const storageKey = getStoredQuizStartKey(quiz.id);
-    let startedAt = Number(window.localStorage.getItem(storageKey));
-
-    if (!startedAt || Number.isNaN(startedAt)) {
-      startedAt = Date.now();
-      window.localStorage.setItem(storageKey, String(startedAt));
-    }
-
-    function updateRemainingTime() {
-      const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
-      const nextRemainingSeconds = Math.max(0, limitMinutes * 60 - elapsedSeconds);
-
-      setRemainingSeconds(nextRemainingSeconds);
-
-      if (nextRemainingSeconds === 0) {
-        setIsTimeExpired(true);
-        setStatus('Time is up. This quiz can no longer be submitted.');
-      } else {
-        setIsTimeExpired(false);
-      }
-    }
-
-    const immediateTimerId = window.setTimeout(updateRemainingTime, 0);
-    const timerId = window.setInterval(updateRemainingTime, 1000);
-
-    return () => {
-      window.clearTimeout(immediateTimerId);
-      window.clearInterval(timerId);
-    };
-  }, [quiz?.id, quiz?.quiz_duration_minutes, result]);
-
   function setSingleAnswer(questionId, choiceId) {
     setAnswers((currentAnswers) => ({ ...currentAnswers, [questionId]: [choiceId] }));
   }
@@ -230,7 +264,7 @@ export default function StudentQuiz() {
     });
   }
 
-  function validateSubmission() {
+  const validateSubmission = useCallback(function validateSubmission() {
     if (isTimeExpired) return 'Time is up. This quiz can no longer be submitted.';
     if (!studentName.trim()) return 'Student name is required.';
     if (!studentEmail.trim()) return 'Student email is required.';
@@ -242,109 +276,335 @@ export default function StudentQuiz() {
     }
 
     return '';
-  }
+  }, [answers, isTimeExpired, orderedQuestions, studentEmail, studentName]);
 
-  async function handleSubmit(event) {
-    event.preventDefault();
-    setStatus('');
+  const submitQuiz = useCallback(
+    async function submitQuiz({ forced = false, reason = '' } = {}) {
+      if (!quiz || result || submissionInFlightRef.current) return;
 
-    const validationMessage = validateSubmission();
+      submissionInFlightRef.current = true;
+      setIsSubmitting(true);
+      setStatus('');
 
-    if (validationMessage) {
-      setStatus(validationMessage);
-      return;
-    }
+      const normalizedStudentName = studentName.trim();
+      const normalizedStudentEmail = studentEmail.trim().toLowerCase();
 
-    setIsSubmitting(true);
+      if (!forced) {
+        const validationMessage = validateSubmission();
 
-    try {
-      const questionIds = orderedQuestions.map((question) => question.id);
-      const { data: answerKeyRows, error: answerKeyError } = await supabase
-        .from('quiz_answer_choices')
-        .select('id, question_id, is_correct')
-        .in('question_id', questionIds);
+        if (validationMessage) {
+          setStatus(validationMessage);
+          setIsSubmitting(false);
+          submissionInFlightRef.current = false;
+          return;
+        }
+      }
 
-      if (answerKeyError) throw answerKeyError;
+      try {
+        const submissionKey = getOrCreateSubmissionKey(quiz.id);
+        const questionIds = orderedQuestions.map((question) => question.id);
+        const { data: answerKeyRows, error: answerKeyError } = await supabase
+          .from('quiz_answer_choices')
+          .select('id, question_id, is_correct')
+          .in('question_id', questionIds);
 
-      const correctChoiceIdsByQuestion = new Map();
+        if (answerKeyError) throw answerKeyError;
 
-      answerKeyRows.forEach((choice) => {
-        if (!choice.is_correct) return;
+        const correctChoiceIdsByQuestion = new Map();
 
-        const currentIds = correctChoiceIdsByQuestion.get(choice.question_id) || [];
-        correctChoiceIdsByQuestion.set(choice.question_id, [...currentIds, choice.id]);
-      });
+        answerKeyRows.forEach((choice) => {
+          if (!choice.is_correct) return;
 
-      let score = 0;
-      const gradedAnswers = orderedQuestions.map((question) => {
-        const selectedChoiceIds = answers[question.id] || [];
-        const correctChoiceIds = correctChoiceIdsByQuestion.get(question.id) || [];
-        const isCorrect = arraysMatch(selectedChoiceIds, correctChoiceIds);
+          const currentIds = correctChoiceIdsByQuestion.get(choice.question_id) || [];
+          correctChoiceIdsByQuestion.set(choice.question_id, [...currentIds, choice.id]);
+        });
 
-        if (isCorrect) score += 1;
+        let score = 0;
+        const gradedAnswers = orderedQuestions.map((question) => {
+          const selectedChoiceIds = answers[question.id] || [];
+          const correctChoiceIds = correctChoiceIdsByQuestion.get(question.id) || [];
+          const isCorrect =
+            selectedChoiceIds.length > 0 &&
+            arraysMatch(selectedChoiceIds, correctChoiceIds);
 
-        return {
-          questionId: question.id,
-          selectedChoiceIds,
-          isCorrect,
-        };
-      });
+          if (isCorrect) score += 1;
 
-      const totalQuestions = orderedQuestions.length;
-      const percentage =
-        totalQuestions > 0 ? Math.round((score / totalQuestions) * 10000) / 100 : 0;
-      const passed = percentage >= Number(quiz.passing_score || 80);
-      const submittedAt = new Date().toISOString();
+          return {
+            questionId: question.id,
+            selectedChoiceIds,
+            isCorrect,
+          };
+        });
 
-      const { data: attempt, error: attemptError } = await supabase
-        .from('quiz_attempts')
-        .insert({
+        const totalQuestions = orderedQuestions.length;
+        const percentage =
+          totalQuestions > 0 ? Math.round((score / totalQuestions) * 10000) / 100 : 0;
+        const passed = percentage >= Number(quiz.passing_score || 80);
+        const submittedAt = new Date().toISOString();
+        const attemptPayload = {
           quiz_template_id: quiz.id,
-          student_name: studentName.trim(),
-          student_email: studentEmail.trim().toLowerCase(),
+          submission_key: submissionKey,
+          student_name:
+            normalizedStudentName ||
+            (forced ? 'Unidentified Student' : normalizedStudentName),
+          student_email:
+            normalizedStudentEmail ||
+            (forced
+              ? `unprovided-${submissionKey}@excourse.local`
+              : normalizedStudentEmail),
           company: company.trim() || null,
           score,
           total_questions: totalQuestions,
           percentage,
           passed,
           submitted_at: submittedAt,
-        })
-        .select()
-        .single();
+        };
 
-      if (attemptError) throw attemptError;
+        let { data: attempt, error: attemptError } = await supabase
+          .from('quiz_attempts')
+          .insert(attemptPayload)
+          .select()
+          .single();
 
-      const attemptAnswers = gradedAnswers.map((answer) => ({
-        quiz_attempt_id: attempt.id,
-        question_id: answer.questionId,
-        selected_choice_ids: answer.selectedChoiceIds,
-        is_correct: answer.isCorrect,
-      }));
+        if (isMissingSubmissionKeyColumn(attemptError)) {
+          const legacyAttemptPayload = { ...attemptPayload };
+          delete legacyAttemptPayload.submission_key;
 
-      const { error: answersError } = await supabase
-        .from('quiz_attempt_answers')
-        .insert(attemptAnswers);
+          console.warn(
+            'quiz_attempts.submission_key is missing. Retrying submission without duplicate-key protection.'
+          );
 
-      if (answersError) throw answersError;
+          const legacyAttemptResponse = await supabase
+            .from('quiz_attempts')
+            .insert(legacyAttemptPayload)
+            .select()
+            .single();
 
-      const submittedResult = { ...attempt, submitted_at: submittedAt };
+          attempt = legacyAttemptResponse.data;
+          attemptError = legacyAttemptResponse.error;
+        }
 
-      window.localStorage.setItem(
-        getStoredAttemptKey(quiz.id, attempt.id),
-        JSON.stringify(submittedResult)
-      );
-      window.localStorage.removeItem(getStoredQuizStartKey(quiz.id));
+        if (attemptError) {
+          if (attemptError.code === '23505') {
+            setStatus('This quiz attempt was already submitted.');
+            return;
+          }
 
-      setResult(submittedResult);
-      setSearchParams({ attemptId: attempt.id }, { replace: true });
-      setStatus('');
-    } catch (error) {
-      console.error('Submit quiz error:', error);
-      setStatus(error?.message || 'Unable to submit the quiz. Please try again.');
-    } finally {
-      setIsSubmitting(false);
-    }
+          throw attemptError;
+        }
+
+        const attemptAnswers = gradedAnswers.map((answer) => ({
+          quiz_attempt_id: attempt.id,
+          question_id: answer.questionId,
+          selected_choice_ids: answer.selectedChoiceIds,
+          is_correct: answer.isCorrect,
+        }));
+
+        const { error: answersError } = await supabase
+          .from('quiz_attempt_answers')
+          .insert(attemptAnswers);
+
+        if (answersError) throw answersError;
+
+        const submittedResult = { ...attempt, submitted_at: submittedAt };
+
+        window.localStorage.setItem(
+          getStoredAttemptKey(quiz.id, attempt.id),
+          JSON.stringify(submittedResult)
+        );
+        window.localStorage.removeItem(getStoredQuizStartKey(quiz.id));
+
+        if (reason === 'time_expired') {
+          await finalizeExpiredQuizSession(quiz.id);
+        }
+
+        setResult(submittedResult);
+        setResultNotice(
+          reason === 'time_expired'
+            ? 'Time is up. Your quiz was submitted automatically.'
+            : forced
+            ? 'The instructor ended the quiz. Your answers were submitted automatically.'
+            : ''
+        );
+        setSearchParams({ attemptId: attempt.id }, { replace: true });
+        setStatus('');
+      } catch (error) {
+        console.error('Submit quiz error:', error);
+        if (forced) {
+          setIsSessionEnded(true);
+          setStatus(
+            error?.message?.toLowerCase().includes('row-level security')
+              ? 'The instructor ended the quiz. Your answers could not be submitted because the live session is already closed.'
+              : error?.message ||
+                  'The instructor ended the quiz, but your answers could not be submitted.'
+          );
+        } else {
+          setStatus(error?.message || 'Unable to submit the quiz. Please try again.');
+        }
+      } finally {
+        setIsSubmitting(false);
+        submissionInFlightRef.current = false;
+      }
+    },
+    [
+      answers,
+      company,
+      orderedQuestions,
+      quiz,
+      result,
+      setSearchParams,
+      studentEmail,
+      studentName,
+      validateSubmission,
+    ]
+  );
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setStatus('');
+    await submitQuiz();
   }
+
+  const triggerForcedSubmit = useCallback(
+    async function triggerForcedSubmit() {
+      if (forcedSubmitTriggeredRef.current || submissionInFlightRef.current || result) {
+        return;
+      }
+
+      forcedSubmitTriggeredRef.current = true;
+      setIsSessionEnded(true);
+      setStatus('The instructor ended the quiz. Submitting your answers automatically...');
+      await submitQuiz({ forced: true });
+    },
+    [result, submitQuiz]
+  );
+
+  useEffect(() => {
+    if (!quiz?.id || result) return undefined;
+
+    async function updateRemainingTime() {
+      const nextRemainingSeconds = getQuizRemainingSeconds(quiz);
+
+      if (nextRemainingSeconds === null) {
+        setRemainingSeconds(null);
+        return;
+      }
+
+      setRemainingSeconds(nextRemainingSeconds);
+
+      if (nextRemainingSeconds > 0) {
+        setIsTimeExpired(false);
+        return;
+      }
+
+      setIsTimeExpired(true);
+
+      if (forcedSubmitTriggeredRef.current || submissionInFlightRef.current) return;
+
+      forcedSubmitTriggeredRef.current = true;
+      setIsSessionEnded(true);
+      setStatus('Time is up. Submitting your quiz automatically...');
+      await submitQuiz({ forced: true, reason: 'time_expired' });
+    }
+
+    const immediateTimerId = window.setTimeout(updateRemainingTime, 0);
+    const timerId = window.setInterval(updateRemainingTime, 1000);
+
+    return () => {
+      window.clearTimeout(immediateTimerId);
+      window.clearInterval(timerId);
+    };
+  }, [quiz, result, submitQuiz]);
+
+  useEffect(() => {
+    if (!quiz?.id || result) return undefined;
+
+    let isActive = true;
+
+    async function checkForceSubmit() {
+      if (forcedSubmitTriggeredRef.current || submissionInFlightRef.current) return;
+
+      let { data, error } = await supabase
+        .from('quiz_templates')
+        .select('id, is_active, results_saved, force_submit, finalizing')
+        .eq('id', quiz.id)
+        .maybeSingle();
+
+      if (isMissingForceSubmitColumns(error)) {
+        const fallbackResponse = await supabase
+          .from('quiz_templates')
+          .select('id, is_active, results_saved')
+          .eq('id', quiz.id)
+          .maybeSingle();
+
+        data = fallbackResponse.data;
+        error = fallbackResponse.error;
+      }
+
+      if (!isActive) return;
+
+      if (error) {
+        console.error('Force submit status check error:', error);
+        return;
+      }
+
+      const shouldForceSubmit =
+        !data ||
+        data.is_active === false ||
+        data.force_submit ||
+        data.finalizing ||
+        data.results_saved;
+
+      if (!shouldForceSubmit) return;
+
+      await triggerForcedSubmit();
+    }
+
+    const immediateTimerId = window.setTimeout(checkForceSubmit, 0);
+    const intervalId = window.setInterval(checkForceSubmit, 2000);
+    const channel = supabase
+      .channel(`quiz-force-submit-${quiz.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'quiz_templates',
+          filter: `id=eq.${quiz.id}`,
+        },
+        (payload) => {
+          const updatedQuiz = payload.new || {};
+          const shouldForceSubmit =
+            updatedQuiz.is_active === false ||
+            updatedQuiz.force_submit ||
+            updatedQuiz.finalizing ||
+            updatedQuiz.results_saved;
+
+          if (shouldForceSubmit) {
+            triggerForcedSubmit();
+          }
+        }
+      )
+      .subscribe();
+
+    function checkWhenVisible() {
+      if (document.visibilityState === 'visible') {
+        checkForceSubmit();
+      }
+    }
+
+    window.addEventListener('focus', checkForceSubmit);
+    document.addEventListener('visibilitychange', checkWhenVisible);
+
+    return () => {
+      isActive = false;
+      window.clearTimeout(immediateTimerId);
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', checkForceSubmit);
+      document.removeEventListener('visibilitychange', checkWhenVisible);
+      supabase.removeChannel(channel);
+    };
+  }, [quiz?.id, result, triggerForcedSubmit]);
 
   function downloadCompletionReport() {
     if (!result || !quiz) return;
@@ -395,9 +655,11 @@ export default function StudentQuiz() {
   }
 
   if (loadError) {
+    const isEndedSession = loadError === 'This quiz session has ended.';
+
     return (
       <section className="card invalid-attendance-link">
-        <h2>Invalid Quiz Link</h2>
+        <h2>{isEndedSession ? 'Quiz submitted' : 'Invalid Quiz Link'}</h2>
         <p>{loadError}</p>
       </section>
     );
@@ -407,6 +669,12 @@ export default function StudentQuiz() {
     return (
       <section className="card quiz-student-card">
         <h2>Quiz Submitted</h2>
+
+        {resultNotice && (
+          <div className="alert alert-success" role="status">
+            {resultNotice}
+          </div>
+        )}
 
         <dl className="quiz-result-details">
           <div>
@@ -481,6 +749,12 @@ export default function StudentQuiz() {
 
       {quiz.quiz_description && <p className="muted">{quiz.quiz_description}</p>}
 
+      {isSessionEnded && !result && (
+        <div className="alert alert-error" role="status">
+          The instructor ended this quiz session.
+        </div>
+      )}
+
       <form className="quiz-form" onSubmit={handleSubmit}>
         <div className="form-row">
           <label>
@@ -489,7 +763,7 @@ export default function StudentQuiz() {
               type="text"
               value={studentName}
               onChange={(event) => setStudentName(event.target.value)}
-              disabled={isTimeExpired}
+              disabled={isTimeExpired || isSessionEnded}
             />
           </label>
 
@@ -499,7 +773,7 @@ export default function StudentQuiz() {
               type="email"
               value={studentEmail}
               onChange={(event) => setStudentEmail(event.target.value)}
-              disabled={isTimeExpired}
+              disabled={isTimeExpired || isSessionEnded}
             />
           </label>
         </div>
@@ -510,7 +784,7 @@ export default function StudentQuiz() {
             type="text"
             value={company}
             onChange={(event) => setCompany(event.target.value)}
-            disabled={isTimeExpired}
+            disabled={isTimeExpired || isSessionEnded}
           />
         </label>
 
@@ -527,7 +801,7 @@ export default function StudentQuiz() {
                     type={question.question_type === 'multiple_choice' ? 'checkbox' : 'radio'}
                     name={`student-answer-${question.id}`}
                     checked={(answers[question.id] || []).includes(choice.id)}
-                    disabled={isTimeExpired}
+                    disabled={isTimeExpired || isSessionEnded}
                     onChange={() => {
                       if (question.question_type === 'multiple_choice') {
                         toggleMultipleAnswer(question.id, choice.id);
@@ -543,7 +817,7 @@ export default function StudentQuiz() {
           ))}
         </div>
 
-        <button type="submit" disabled={isSubmitting || isTimeExpired}>
+        <button type="submit" disabled={isSubmitting || isTimeExpired || isSessionEnded}>
           {isSubmitting ? 'Submitting Quiz...' : 'Submit Quiz'}
         </button>
 

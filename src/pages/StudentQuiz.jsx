@@ -46,6 +46,23 @@ function getStoredAttemptKey(quizId, attemptId) {
   return `excourse_quiz_attempt_${quizId}_${attemptId}`;
 }
 
+function getStoredQuizStartKey(quizId) {
+  return `excourse_quiz_started_${quizId}`;
+}
+
+function formatRemainingTime(totalSeconds) {
+  const seconds = Math.max(0, Number(totalSeconds || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  const paddedMinutes = String(minutes).padStart(hours ? 2 : 1, '0');
+  const paddedSeconds = String(remainingSeconds).padStart(2, '0');
+
+  return hours
+    ? `${hours}:${paddedMinutes}:${paddedSeconds}`
+    : `${paddedMinutes}:${paddedSeconds}`;
+}
+
 export default function StudentQuiz() {
   const { quizId } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -59,6 +76,8 @@ export default function StudentQuiz() {
   const [status, setStatus] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [result, setResult] = useState(null);
+  const [remainingSeconds, setRemainingSeconds] = useState(null);
+  const [isTimeExpired, setIsTimeExpired] = useState(false);
   const attemptIdFromUrl = searchParams.get('attemptId') || '';
 
   const orderedQuestions = useMemo(() => {
@@ -90,6 +109,7 @@ export default function StudentQuiz() {
           instructor_name,
           class_date,
           passing_score,
+          quiz_duration_minutes,
           is_active,
           quiz_questions (
             id,
@@ -155,6 +175,46 @@ export default function StudentQuiz() {
     }
   }, [attemptIdFromUrl, quizId]);
 
+  useEffect(() => {
+    if (!quiz?.id || result) return undefined;
+
+    const parsedLimitMinutes = Number(quiz.quiz_duration_minutes || 30);
+    const limitMinutes =
+      Number.isFinite(parsedLimitMinutes) && parsedLimitMinutes > 0
+        ? parsedLimitMinutes
+        : 30;
+
+    const storageKey = getStoredQuizStartKey(quiz.id);
+    let startedAt = Number(window.localStorage.getItem(storageKey));
+
+    if (!startedAt || Number.isNaN(startedAt)) {
+      startedAt = Date.now();
+      window.localStorage.setItem(storageKey, String(startedAt));
+    }
+
+    function updateRemainingTime() {
+      const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+      const nextRemainingSeconds = Math.max(0, limitMinutes * 60 - elapsedSeconds);
+
+      setRemainingSeconds(nextRemainingSeconds);
+
+      if (nextRemainingSeconds === 0) {
+        setIsTimeExpired(true);
+        setStatus('Time is up. This quiz can no longer be submitted.');
+      } else {
+        setIsTimeExpired(false);
+      }
+    }
+
+    const immediateTimerId = window.setTimeout(updateRemainingTime, 0);
+    const timerId = window.setInterval(updateRemainingTime, 1000);
+
+    return () => {
+      window.clearTimeout(immediateTimerId);
+      window.clearInterval(timerId);
+    };
+  }, [quiz?.id, quiz?.quiz_duration_minutes, result]);
+
   function setSingleAnswer(questionId, choiceId) {
     setAnswers((currentAnswers) => ({ ...currentAnswers, [questionId]: [choiceId] }));
   }
@@ -171,6 +231,7 @@ export default function StudentQuiz() {
   }
 
   function validateSubmission() {
+    if (isTimeExpired) return 'Time is up. This quiz can no longer be submitted.';
     if (!studentName.trim()) return 'Student name is required.';
     if (!studentEmail.trim()) return 'Student email is required.';
 
@@ -272,6 +333,7 @@ export default function StudentQuiz() {
         getStoredAttemptKey(quiz.id, attempt.id),
         JSON.stringify(submittedResult)
       );
+      window.localStorage.removeItem(getStoredQuizStartKey(quiz.id));
 
       setResult(submittedResult);
       setSearchParams({ attemptId: attempt.id }, { replace: true });
@@ -410,6 +472,13 @@ export default function StudentQuiz() {
         </div>
       </dl>
 
+      {remainingSeconds !== null && (
+        <div className={`quiz-countdown ${isTimeExpired ? 'is-expired' : ''}`}>
+          <span>Time Remaining</span>
+          <strong>{formatRemainingTime(remainingSeconds)}</strong>
+        </div>
+      )}
+
       {quiz.quiz_description && <p className="muted">{quiz.quiz_description}</p>}
 
       <form className="quiz-form" onSubmit={handleSubmit}>
@@ -420,6 +489,7 @@ export default function StudentQuiz() {
               type="text"
               value={studentName}
               onChange={(event) => setStudentName(event.target.value)}
+              disabled={isTimeExpired}
             />
           </label>
 
@@ -429,6 +499,7 @@ export default function StudentQuiz() {
               type="email"
               value={studentEmail}
               onChange={(event) => setStudentEmail(event.target.value)}
+              disabled={isTimeExpired}
             />
           </label>
         </div>
@@ -439,6 +510,7 @@ export default function StudentQuiz() {
             type="text"
             value={company}
             onChange={(event) => setCompany(event.target.value)}
+            disabled={isTimeExpired}
           />
         </label>
 
@@ -455,6 +527,7 @@ export default function StudentQuiz() {
                     type={question.question_type === 'multiple_choice' ? 'checkbox' : 'radio'}
                     name={`student-answer-${question.id}`}
                     checked={(answers[question.id] || []).includes(choice.id)}
+                    disabled={isTimeExpired}
                     onChange={() => {
                       if (question.question_type === 'multiple_choice') {
                         toggleMultipleAnswer(question.id, choice.id);
@@ -470,7 +543,7 @@ export default function StudentQuiz() {
           ))}
         </div>
 
-        <button type="submit" disabled={isSubmitting}>
+        <button type="submit" disabled={isSubmitting || isTimeExpired}>
           {isSubmitting ? 'Submitting Quiz...' : 'Submit Quiz'}
         </button>
 

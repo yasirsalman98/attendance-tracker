@@ -11,6 +11,30 @@ function getTodayDateValue() {
   return localDate.toISOString().split('T')[0];
 }
 
+function formatDate(value) {
+  if (!value) return 'Not provided';
+
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return date.toLocaleDateString();
+}
+
+function formatDuration(minutes) {
+  const duration = Number(minutes || 0);
+
+  if (duration === 1) return '1 minute';
+  if (duration < 60) return `${duration} minutes`;
+
+  const hours = Math.floor(duration / 60);
+  const remainingMinutes = duration % 60;
+  const hourLabel = hours === 1 ? '1 hour' : `${hours} hours`;
+
+  return remainingMinutes
+    ? `${hourLabel} ${remainingMinutes} min`
+    : hourLabel;
+}
+
 function createChoice(text = '') {
   return {
     id: crypto.randomUUID(),
@@ -117,6 +141,7 @@ export default function CreateQuiz() {
   const [instructorName, setInstructorName] = useState('');
   const [classDate, setClassDate] = useState(getTodayDateValue());
   const [passingScore, setPassingScore] = useState(80);
+  const [quizDurationMinutes, setQuizDurationMinutes] = useState(30);
   const [questions, setQuestions] = useState([createQuestion()]);
   const [createdQuiz, setCreatedQuiz] = useState(null);
   const [errorMessage, setErrorMessage] = useState('');
@@ -130,6 +155,9 @@ export default function CreateQuiz() {
   const [showLoadQuizPanel, setShowLoadQuizPanel] = useState(false);
   const [isLoadingSavedQuizzes, setIsLoadingSavedQuizzes] = useState(false);
   const [isLoadingQuizQuestions, setIsLoadingQuizQuestions] = useState(false);
+  const [activeQuizzes, setActiveQuizzes] = useState([]);
+  const [isLoadingActiveQuizzes, setIsLoadingActiveQuizzes] = useState(false);
+  const [cancelingQuizId, setCancelingQuizId] = useState('');
   const quizIdFromUrl = searchParams.get('quizId') || '';
 
   const studentQuizLink = useMemo(() => {
@@ -188,6 +216,10 @@ export default function CreateQuiz() {
       isActive = false;
     };
   }, [quizIdFromUrl]);
+
+  useEffect(() => {
+    loadActiveQuizzes();
+  }, []);
 
   useEffect(() => {
     if (!createdQuiz) return;
@@ -310,6 +342,14 @@ export default function CreateQuiz() {
       return 'Passing score must be between 0 and 100.';
     }
 
+    if (
+      !Number.isFinite(Number(quizDurationMinutes)) ||
+      Number(quizDurationMinutes) < 1 ||
+      Number(quizDurationMinutes) > 480
+    ) {
+      return 'Countdown time must be between 1 and 480 minutes.';
+    }
+
     for (let questionIndex = 0; questionIndex < questions.length; questionIndex += 1) {
       const question = questions[questionIndex];
       const questionNumber = questionIndex + 1;
@@ -365,7 +405,7 @@ export default function CreateQuiz() {
 
     const { data, error } = await supabase
       .from('quiz_templates')
-      .select('id, course_name, quiz_title, class_date, is_active, created_at')
+      .select('id, course_name, quiz_title, class_date, is_active, quiz_duration_minutes, created_at')
       .eq('owner_user_id', userId)
       .order('created_at', { ascending: false });
 
@@ -445,6 +485,7 @@ export default function CreateQuiz() {
       setInstructorName(data.instructor_name || '');
       setClassDate(data.class_date || getTodayDateValue());
       setPassingScore(data.passing_score ?? 80);
+      setQuizDurationMinutes(data.quiz_duration_minutes || 30);
       setQuestions(loadedQuestions.length ? loadedQuestions : [createQuestion()]);
       setCreatedQuiz(null);
       setSavedDraftId('');
@@ -469,6 +510,7 @@ export default function CreateQuiz() {
     setInstructorName('');
     setClassDate(getTodayDateValue());
     setPassingScore(80);
+    setQuizDurationMinutes(30);
     setQuestions([createQuestion()]);
     setCreatedQuiz(null);
     setSavedDraftId('');
@@ -505,6 +547,7 @@ export default function CreateQuiz() {
         instructor_name: instructorName.trim() || null,
         class_date: classDate || null,
         passing_score: Number(passingScore),
+        quiz_duration_minutes: Number(quizDurationMinutes),
         is_active: publish,
         owner_user_id: userId,
       };
@@ -575,6 +618,7 @@ export default function CreateQuiz() {
         setCreatedQuiz(quizTemplate);
         setSearchParams({ quizId: quizTemplate.id });
         setStatusMessage('Quiz published successfully.');
+        await loadActiveQuizzes();
       } else {
         setSavedDraftId(quizTemplate.id);
         setSearchParams({});
@@ -586,6 +630,75 @@ export default function CreateQuiz() {
     } finally {
       setSavingAction('');
     }
+  }
+
+  async function loadActiveQuizzes() {
+    setIsLoadingActiveQuizzes(true);
+
+    try {
+      const userId = await getCurrentUserId();
+      const { data, error } = await supabase
+        .from('quiz_templates')
+        .select('id, course_name, quiz_title, class_date, passing_score, quiz_duration_minutes, created_at')
+        .eq('owner_user_id', userId)
+        .eq('is_active', true)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+
+      setActiveQuizzes(data || []);
+    } catch (error) {
+      console.error('Load active quizzes error:', error);
+    } finally {
+      setIsLoadingActiveQuizzes(false);
+    }
+  }
+
+  async function cancelQuizSession(quiz) {
+    const confirmed = window.confirm(
+      `Cancel ${quiz.course_name || 'this course'} - ${quiz.quiz_title || 'this quiz'}? Students will no longer be able to open or submit it.`
+    );
+
+    if (!confirmed) return;
+
+    setCancelingQuizId(quiz.id);
+    setErrorMessage('');
+    setStatusMessage('');
+
+    try {
+      const { error } = await supabase
+        .from('quiz_templates')
+        .update({ is_active: false })
+        .eq('id', quiz.id);
+
+      if (error) throw error;
+
+      setActiveQuizzes((currentQuizzes) =>
+        currentQuizzes.filter((activeQuiz) => activeQuiz.id !== quiz.id)
+      );
+
+      if (createdQuiz?.id === quiz.id) {
+        setCreatedQuiz((currentQuiz) =>
+          currentQuiz ? { ...currentQuiz, is_active: false } : currentQuiz
+        );
+      }
+
+      setStatusMessage('Quiz session canceled. Students can no longer access it.');
+    } catch (error) {
+      console.error('Cancel quiz session error:', error);
+      setErrorMessage(error?.message || 'Unable to cancel quiz session.');
+    } finally {
+      setCancelingQuizId('');
+    }
+  }
+
+  function openActiveQuiz(quiz) {
+    setCreatedQuiz(quiz);
+    setCopied(false);
+    setErrorMessage('');
+    setDraftStatusMessage('');
+    setStatusMessage('Quiz loaded.');
+    setSearchParams({ quizId: quiz.id });
   }
 
   function handleSubmit(event) {
@@ -645,6 +758,70 @@ export default function CreateQuiz() {
             {statusMessage}
           </div>
         )}
+
+        <section className="active-quiz-panel">
+          <div className="quiz-section-header">
+            <div>
+              <h2>Active Quiz Sessions</h2>
+              <p>Published quizzes students can open right now.</p>
+            </div>
+            <button
+              type="button"
+              className="secondary-button compact-button"
+              onClick={loadActiveQuizzes}
+              disabled={isLoadingActiveQuizzes}
+            >
+              {isLoadingActiveQuizzes ? 'Refreshing...' : 'Refresh'}
+            </button>
+          </div>
+
+          {isLoadingActiveQuizzes ? (
+            <p className="muted">Loading active quizzes...</p>
+          ) : activeQuizzes.length === 0 ? (
+            <p className="muted">No active quiz sessions.</p>
+          ) : (
+            <div className="active-quiz-list">
+              {activeQuizzes.map((quiz) => (
+                <div
+                  className="active-quiz-row"
+                  key={quiz.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => openActiveQuiz(quiz)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      openActiveQuiz(quiz);
+                    }
+                  }}
+                >
+                  <div>
+                    <strong>
+                      {quiz.course_name || 'Untitled Course'} -{' '}
+                      {quiz.quiz_title || 'Untitled Quiz'}
+                    </strong>
+                    <div className="active-quiz-meta">
+                      <span>{formatDate(quiz.class_date)}</span>
+                      <span>Passing: {quiz.passing_score}%</span>
+                      <span>Time: {formatDuration(quiz.quiz_duration_minutes || 30)}</span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="secondary-button quiz-cancel-button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      cancelQuizSession(quiz);
+                    }}
+                    disabled={cancelingQuizId === quiz.id}
+                  >
+                    {cancelingQuizId === quiz.id ? 'Canceling...' : 'Cancel Session'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
 
         {!createdQuiz ? (
           <form className="quiz-form" onSubmit={handleSubmit}>
@@ -738,7 +915,7 @@ export default function CreateQuiz() {
               />
             </div>
 
-            <div className="form-row three-column-row">
+            <div className="form-row four-column-row">
               <div className="form-group">
                 <label htmlFor="instructorName">Instructor Name</label>
                 <input
@@ -769,6 +946,19 @@ export default function CreateQuiz() {
                   step="1"
                   value={passingScore}
                   onChange={(event) => setPassingScore(event.target.value)}
+                />
+              </div>
+
+              <div className="form-group">
+                <label htmlFor="quizDurationMinutes">Countdown Time *</label>
+                <input
+                  id="quizDurationMinutes"
+                  type="number"
+                  min="1"
+                  max="480"
+                  step="1"
+                  value={quizDurationMinutes}
+                  onChange={(event) => setQuizDurationMinutes(event.target.value)}
                 />
               </div>
             </div>
@@ -932,6 +1122,10 @@ export default function CreateQuiz() {
                   <dt>Passing Score</dt>
                   <dd>{createdQuiz.passing_score}%</dd>
                 </div>
+                <div>
+                  <dt>Time Limit</dt>
+                  <dd>{formatDuration(createdQuiz.quiz_duration_minutes || 30)}</dd>
+                </div>
               </dl>
             </div>
 
@@ -945,33 +1139,51 @@ export default function CreateQuiz() {
               </div>
             </div>
 
-            <div className="qr-code-box">
-              <div className="qr-code-image" ref={qrCodeRef}>
-                <QRCodeCanvas value={studentQuizLink} size={220} level="M" marginSize={4} />
+            {createdQuiz.is_active === false ? (
+              <div className="alert alert-error" role="status">
+                This quiz session is canceled. Students can no longer open it.
               </div>
-              <div className="qr-code-copy">
-                <h2>Student QR Code</h2>
-                <p>Students can scan this QR code to open the quiz.</p>
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={handleDownloadQrCode}
-                >
-                  Download QR Code
-                </button>
+            ) : (
+              <div className="qr-code-box">
+                <div className="qr-code-image" ref={qrCodeRef}>
+                  <QRCodeCanvas value={studentQuizLink} size={220} level="M" marginSize={4} />
+                </div>
+                <div className="qr-code-copy">
+                  <h2>Student QR Code</h2>
+                  <p>Students can scan this QR code to open the quiz.</p>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={handleDownloadQrCode}
+                  >
+                    Download QR Code
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="action-row">
-              <a className="primary-button link-button" href={studentQuizLink}>
-                Open Student Quiz
-              </a>
+              {createdQuiz.is_active !== false && (
+                <a className="primary-button link-button" href={studentQuizLink}>
+                  Open Student Quiz
+                </a>
+              )}
               <Link
                 className="secondary-link-button"
                 to={`/quiz-results-7392?quizId=${createdQuiz.id}`}
               >
                 View Quiz Results
               </Link>
+              {createdQuiz.is_active !== false && (
+                <button
+                  type="button"
+                  className="secondary-button quiz-cancel-button"
+                  onClick={() => cancelQuizSession(createdQuiz)}
+                  disabled={cancelingQuizId === createdQuiz.id}
+                >
+                  {cancelingQuizId === createdQuiz.id ? 'Canceling...' : 'Cancel Session'}
+                </button>
+              )}
             </div>
           </section>
         )}

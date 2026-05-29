@@ -8,6 +8,7 @@ create table if not exists public.quiz_templates (
   instructor_name text,
   class_date date,
   passing_score numeric not null default 80,
+  quiz_duration_minutes integer not null default 30,
   is_active boolean not null default true,
   owner_user_id uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now(),
@@ -16,6 +17,16 @@ create table if not exists public.quiz_templates (
 
 alter table public.quiz_templates
 add column if not exists owner_user_id uuid references auth.users(id) on delete set null;
+
+alter table public.quiz_templates
+add column if not exists quiz_duration_minutes integer not null default 30;
+
+alter table public.quiz_templates
+drop constraint if exists quiz_templates_duration_check;
+
+alter table public.quiz_templates
+add constraint quiz_templates_duration_check
+  check (quiz_duration_minutes between 1 and 480);
 
 create index if not exists quiz_templates_owner_user_id_idx
   on public.quiz_templates (owner_user_id);

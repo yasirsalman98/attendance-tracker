@@ -352,6 +352,7 @@ async function copyQuizzesToUser(adminClient, sourceUserId, targetUserId) {
       instructor_name,
       class_date,
       passing_score,
+      quiz_duration_minutes,
       quiz_questions (
         question_text,
         question_type,
@@ -380,6 +381,7 @@ async function copyQuizzesToUser(adminClient, sourceUserId, targetUserId) {
         instructor_name: quiz.instructor_name,
         class_date: quiz.class_date,
         passing_score: quiz.passing_score,
+        quiz_duration_minutes: quiz.quiz_duration_minutes || 30,
         is_active: false,
         owner_user_id: targetUserId,
       })

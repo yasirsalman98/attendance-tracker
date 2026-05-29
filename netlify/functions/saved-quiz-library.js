@@ -47,6 +47,10 @@ function hasSavedQuizLibrary(user) {
   return Boolean(user?.user_metadata?.imported_assets?.quizzes);
 }
 
+function isSettingsAdmin(user) {
+  return String(user?.email || '').toLowerCase() === settingsAdminEmail;
+}
+
 async function getUserByEmail(adminClient, email) {
   const { data, error } = await adminClient.auth.admin.listUsers({
     page: 1,
@@ -58,6 +62,29 @@ async function getUserByEmail(adminClient, email) {
   return (data?.users || []).find(
     (user) => String(user.email || '').toLowerCase() === email
   );
+}
+
+async function getUserEmailMap(adminClient) {
+  const { data, error } = await adminClient.auth.admin.listUsers({
+    page: 1,
+    perPage: 1000,
+  });
+
+  if (error) throw error;
+
+  return new Map(
+    (data?.users || []).map((user) => [
+      user.id,
+      String(user.email || '').toLowerCase(),
+    ])
+  );
+}
+
+function withOwnerEmail(quiz, userEmailById) {
+  return {
+    ...quiz,
+    owner_email: userEmailById.get(quiz.owner_user_id) || '',
+  };
 }
 
 async function getSavedLibraryQuizKeys(adminClient, sourceUserId) {
@@ -192,8 +219,62 @@ async function copyQuizzesToUser(adminClient, sourceUserId, targetUserId) {
   return copiedCount;
 }
 
+async function listSavedQuizzes(adminClient, user) {
+  let query = adminClient
+    .from('quiz_templates')
+    .select('id, course_name, quiz_title, class_date, is_active, quiz_duration_minutes, created_at, owner_user_id')
+    .order('created_at', { ascending: false });
+
+  if (!isSettingsAdmin(user)) {
+    query = query.eq('owner_user_id', user.id);
+  }
+
+  const { data, error } = await query;
+
+  if (error) throw error;
+
+  if (!isSettingsAdmin(user)) {
+    return data || [];
+  }
+
+  const userEmailById = await getUserEmailMap(adminClient);
+
+  return (data || []).map((quiz) => withOwnerEmail(quiz, userEmailById));
+}
+
+async function getSavedQuizDetails(adminClient, user, quizId) {
+  let query = adminClient
+    .from('quiz_templates')
+    .select(`
+      *,
+      quiz_questions (
+        id,
+        question_text,
+        question_type,
+        sort_order,
+        quiz_answer_choices (
+          id,
+          choice_text,
+          is_correct,
+          sort_order
+        )
+      )
+    `)
+    .eq('id', quizId);
+
+  if (!isSettingsAdmin(user)) {
+    query = query.eq('owner_user_id', user.id);
+  }
+
+  const { data, error } = await query.maybeSingle();
+
+  if (error) throw error;
+
+  return data;
+}
+
 export async function handler(event) {
-  if (event.httpMethod !== 'POST') {
+  if (!['GET', 'POST'].includes(event.httpMethod)) {
     return jsonResponse(405, { error: 'Method not allowed.' });
   }
 
@@ -220,10 +301,40 @@ export async function handler(event) {
   }
 
   try {
+    if (event.httpMethod === 'GET') {
+      const params = new URLSearchParams(event.rawQuery || '');
+      const quizId = params.get('quizId') || '';
+
+      if (quizId) {
+        const savedQuiz = await getSavedQuizDetails(
+          adminClient,
+          userData.user,
+          quizId
+        );
+
+        if (!savedQuiz) {
+          return jsonResponse(404, { error: 'Saved quiz was not found.' });
+        }
+
+        return jsonResponse(200, { savedQuiz });
+      }
+
+      const savedQuizzes = await listSavedQuizzes(adminClient, userData.user);
+
+      return jsonResponse(200, { savedQuizzes });
+    }
+
     const sourceUser = await getUserByEmail(adminClient, settingsAdminEmail);
 
     if (!sourceUser?.id) {
       return jsonResponse(404, { error: 'Saved quiz library owner was not found.' });
+    }
+
+    if (isSettingsAdmin(userData.user)) {
+      return jsonResponse(200, {
+        importedQuizCount: 0,
+        skipped: true,
+      });
     }
 
     if (!hasSavedQuizLibrary(userData.user)) {

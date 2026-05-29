@@ -83,6 +83,17 @@ async function getCurrentUserId() {
   return data.user.id;
 }
 
+async function getCurrentAccessToken() {
+  const { data, error } = await supabase.auth.getSession();
+  const accessToken = data?.session?.access_token;
+
+  if (error || !accessToken) {
+    throw new Error('Please sign in again.');
+  }
+
+  return accessToken;
+}
+
 function isLocalHost() {
   return (
     window.location.hostname === 'localhost' ||
@@ -98,22 +109,11 @@ function getSavedQuizLibraryUrl() {
   return '/.netlify/functions/saved-quiz-library';
 }
 
-async function syncSavedQuizLibrary() {
-  const { data, error } = await supabase.auth.getSession();
-  const accessToken = data?.session?.access_token;
-
-  if (error || !accessToken) return 0;
-
-  const response = await fetch(getSavedQuizLibraryUrl(), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+async function readFunctionJson(response, fallbackMessage) {
   const responseText = await response.text();
   let responseData = null;
 
-  if (responseText) {
+  if (responseText.trim()) {
     try {
       responseData = JSON.parse(responseText);
     } catch {
@@ -125,11 +125,46 @@ async function syncSavedQuizLibrary() {
     throw new Error(
       responseData?.error ||
         (responseText && !responseText.trim().startsWith('<') ? responseText : '') ||
-        `Unable to sync saved quiz library. (${response.status} ${response.statusText})`
+        `${fallbackMessage} (${response.status} ${response.statusText})`
     );
   }
 
+  return responseData || {};
+}
+
+async function syncSavedQuizLibrary() {
+  const accessToken = await getCurrentAccessToken();
+
+  const response = await fetch(getSavedQuizLibraryUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  const responseData = await readFunctionJson(
+    response,
+    'Unable to sync saved quiz library.'
+  );
+
   return responseData?.importedQuizCount || 0;
+}
+
+async function fetchSavedQuizLibrary(params = {}) {
+  const accessToken = await getCurrentAccessToken();
+  const url = new URL(getSavedQuizLibraryUrl(), window.location.origin);
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value) url.searchParams.set(key, value);
+  });
+
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  return readFunctionJson(response, 'Unable to load saved quiz library.');
 }
 
 export default function CreateQuiz() {
@@ -389,34 +424,11 @@ export default function CreateQuiz() {
     setDraftStatusMessage('');
     setIsLoadingSavedQuizzes(true);
 
-    let userId;
-
     try {
-      userId = await getCurrentUserId();
       await syncSavedQuizLibrary();
-    } catch (error) {
-      setSavedQuizzes([]);
-      setSelectedSavedQuizId('');
-      setStatusMessage('');
-      setErrorMessage(error?.message || 'Please sign in again.');
-      setIsLoadingSavedQuizzes(false);
-      return;
-    }
+      const libraryData = await fetchSavedQuizLibrary();
+      const quizzes = libraryData.savedQuizzes || [];
 
-    const { data, error } = await supabase
-      .from('quiz_templates')
-      .select('id, course_name, quiz_title, class_date, is_active, quiz_duration_minutes, created_at')
-      .eq('owner_user_id', userId)
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      console.error('Load saved quizzes error:', error);
-      setSavedQuizzes([]);
-      setSelectedSavedQuizId('');
-      setStatusMessage('');
-      setErrorMessage(error.message || 'Unable to load saved quizzes.');
-    } else {
-      const quizzes = data || [];
       setSavedQuizzes(quizzes);
       setSelectedSavedQuizId((currentId) =>
         quizzes.some((quiz) => quiz.id === currentId)
@@ -424,6 +436,13 @@ export default function CreateQuiz() {
           : quizzes[0]?.id || ''
       );
       setStatusMessage(quizzes.length ? '' : 'No saved quizzes found yet.');
+    } catch (error) {
+      setSavedQuizzes([]);
+      setSelectedSavedQuizId('');
+      setStatusMessage('');
+      setErrorMessage(error?.message || 'Please sign in again.');
+      setIsLoadingSavedQuizzes(false);
+      return;
     }
 
     setIsLoadingSavedQuizzes(false);
@@ -440,43 +459,18 @@ export default function CreateQuiz() {
     setDraftStatusMessage('');
     setIsLoadingQuizQuestions(true);
 
-    let userId;
-
     try {
-      userId = await getCurrentUserId();
-    } catch (error) {
-      setStatusMessage('');
-      setErrorMessage(error?.message || 'Please sign in again.');
-      setIsLoadingQuizQuestions(false);
-      return;
-    }
+      const { savedQuiz: data } = await fetchSavedQuizLibrary({
+        quizId: selectedSavedQuizId,
+      });
 
-    const { data, error } = await supabase
-      .from('quiz_templates')
-      .select(`
-        *,
-        quiz_questions (
-          id,
-          question_text,
-          question_type,
-          sort_order,
-          quiz_answer_choices (
-            id,
-            choice_text,
-            is_correct,
-            sort_order
-          )
-        )
-      `)
-      .eq('id', selectedSavedQuizId)
-      .eq('owner_user_id', userId)
-      .maybeSingle();
+      if (!data) {
+        setStatusMessage('');
+        setErrorMessage('Unable to load that saved quiz.');
+        setIsLoadingQuizQuestions(false);
+        return;
+      }
 
-    if (error || !data) {
-      console.error('Load selected quiz questions error:', error);
-      setStatusMessage('');
-      setErrorMessage('Unable to load that saved quiz.');
-    } else {
       const loadedQuestions = mapSavedQuizQuestions(data);
 
       setCourseName(data.course_name || '');
@@ -492,6 +486,10 @@ export default function CreateQuiz() {
       setCopied(false);
       setSearchParams({});
       setStatusMessage('Saved quiz questions loaded. Review them, then save to create a new quiz link.');
+    } catch (error) {
+      console.error('Load selected quiz questions error:', error);
+      setStatusMessage('');
+      setErrorMessage(error?.message || 'Unable to load that saved quiz.');
     }
 
     setIsLoadingQuizQuestions(false);
@@ -858,6 +856,7 @@ export default function CreateQuiz() {
                         <option key={quiz.id} value={quiz.id}>
                           {quiz.course_name} - {quiz.quiz_title}
                           {quiz.is_active ? '' : ' (Draft)'}
+                          {quiz.owner_email ? ` - ${quiz.owner_email}` : ''}
                         </option>
                       ))
                     )}

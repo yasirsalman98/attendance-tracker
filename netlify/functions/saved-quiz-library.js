@@ -59,6 +59,15 @@ function isSettingsAdmin(user) {
   return normalizeEmail(user?.email) === settingsAdminEmail;
 }
 
+function getQueryParam(event, key) {
+  if (event.queryStringParameters?.[key]) {
+    return event.queryStringParameters[key];
+  }
+
+  const params = new URLSearchParams(event.rawQuery || '');
+  return params.get(key) || '';
+}
+
 async function listAuthUsers(adminClient) {
   const { data, error } = await adminClient.auth.admin.listUsers({
     page: 1,
@@ -334,8 +343,7 @@ export async function handler(event) {
 
   try {
     if (event.httpMethod === 'GET') {
-      const params = new URLSearchParams(event.rawQuery || '');
-      const quizId = params.get('quizId') || '';
+      const quizId = getQueryParam(event, 'quizId');
 
       if (quizId) {
         const savedQuiz = await getSavedQuizDetails(

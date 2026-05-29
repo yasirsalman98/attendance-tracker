@@ -856,7 +856,6 @@ export default function CreateQuiz() {
                         <option key={quiz.id} value={quiz.id}>
                           {quiz.course_name} - {quiz.quiz_title}
                           {quiz.is_active ? '' : ' (Draft)'}
-                          {quiz.owner_email ? ` - ${quiz.owner_email}` : ''}
                         </option>
                       ))
                     )}

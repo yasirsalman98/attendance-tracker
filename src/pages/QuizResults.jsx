@@ -22,7 +22,10 @@ function formatDateTime(value) {
 }
 
 function formatQuizLabel(quiz) {
-  return `${quiz.course_name || 'Untitled Course'} - ${quiz.quiz_title || 'Untitled Quiz'}`;
+  const statusLabel =
+    !quiz.is_active && quiz.results_saved ? ' (Saved Results)' : '';
+
+  return `${quiz.course_name || 'Untitled Course'} - ${quiz.quiz_title || 'Untitled Quiz'}${statusLabel}`;
 }
 
 function getAveragePercentage(attempts) {
@@ -171,19 +174,33 @@ export default function QuizResults() {
       return;
     }
 
-    const { data, error } = await supabase
-      .from('quiz_templates')
-      .select(`
-        *,
-        quiz_questions (
-          id,
-          question_text,
-          sort_order
-        )
-      `)
-      .eq('owner_user_id', userId)
-      .eq('is_active', true)
-      .order('created_at', { ascending: false });
+    const selectQuizzes = (includeSavedResults) => {
+      let query = supabase
+        .from('quiz_templates')
+        .select(`
+          *,
+          quiz_questions (
+            id,
+            question_text,
+            sort_order
+          )
+        `)
+        .eq('owner_user_id', userId);
+
+      query = includeSavedResults
+        ? query.or('is_active.eq.true,results_saved.eq.true')
+        : query.eq('is_active', true);
+
+      return query.order('created_at', { ascending: false });
+    };
+
+    let { data, error } = await selectQuizzes(true);
+
+    if (error?.message?.includes('results_saved')) {
+      const fallbackResponse = await selectQuizzes(false);
+      data = fallbackResponse.data;
+      error = fallbackResponse.error;
+    }
 
     if (error) {
       console.error('Load quizzes error:', error);

@@ -10,6 +10,7 @@ create table if not exists public.quiz_templates (
   passing_score numeric not null default 80,
   quiz_duration_minutes integer not null default 30,
   is_active boolean not null default true,
+  results_saved boolean not null default false,
   owner_user_id uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -20,6 +21,9 @@ add column if not exists owner_user_id uuid references auth.users(id) on delete 
 
 alter table public.quiz_templates
 add column if not exists quiz_duration_minutes integer not null default 30;
+
+alter table public.quiz_templates
+add column if not exists results_saved boolean not null default false;
 
 alter table public.quiz_templates
 drop constraint if exists quiz_templates_duration_check;

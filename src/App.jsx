@@ -14,6 +14,7 @@ import CreateTrainingSession from './pages/CreateTrainingSession';
 import CreateQuiz from './pages/CreateQuiz';
 import InstructorDashboard from './pages/InstructorDashboard';
 import Login from './pages/Login';
+import Quizzes from './pages/Quizzes';
 import QuizResults from './pages/QuizResults';
 import Settings from './pages/Settings';
 import StudentQuiz from './pages/StudentQuiz';
@@ -23,6 +24,7 @@ import './App.css';
 const protectedPaths = [
   '/instructor-7392',
   '/create-session-7392',
+  '/quizzes-7392',
   '/create-quiz-7392',
   '/records-7392',
   '/quiz-results-7392',
@@ -154,7 +156,7 @@ function AppShell() {
             <Link to="/records-7392" className="header-nav-button">
               Attendance Records
             </Link>
-            <Link to="/create-quiz-7392" className="header-nav-button">
+            <Link to="/quizzes-7392" className="header-nav-button">
               Quizzes
             </Link>
             {isSettingsAdmin(session) && (
@@ -188,6 +190,14 @@ function AppShell() {
             element={
               <ProtectedRoute session={session} isAuthLoading={isAuthLoading}>
                 <CreateTrainingSession />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/quizzes-7392"
+            element={
+              <ProtectedRoute session={session} isAuthLoading={isAuthLoading}>
+                <Quizzes />
               </ProtectedRoute>
             }
           />

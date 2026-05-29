@@ -182,7 +182,7 @@
 
 .load-quiz-row {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr auto auto auto;
   gap: 10px;
   align-items: center;
 }
@@ -286,6 +286,23 @@
   color: #52616f;
   font-size: 0.92rem;
   font-weight: 700;
+}
+
+.active-quiz-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.quiz-page .quiz-save-results-button {
+  border: 1px solid #036f5e;
+  background: #ffffff;
+  color: #036f5e;
+}
+
+.quiz-page .quiz-save-results-button:hover {
+  background: #ecfdf5;
 }
 
 .quiz-page .quiz-cancel-button {
@@ -708,6 +725,13 @@
 
 .secondary-link-button:hover {
   background: #cbd5e1;
+}
+
+.compact-link-button {
+  align-self: center;
+  min-height: 44px;
+  padding: 10px 18px;
+  white-space: nowrap;
 }
 
 .student-link-box {

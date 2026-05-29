@@ -193,6 +193,8 @@ export default function CreateQuiz() {
   const [activeQuizzes, setActiveQuizzes] = useState([]);
   const [isLoadingActiveQuizzes, setIsLoadingActiveQuizzes] = useState(false);
   const [cancelingQuizId, setCancelingQuizId] = useState('');
+  const [savingResultsQuizId, setSavingResultsQuizId] = useState('');
+  const [deletingSavedQuizId, setDeletingSavedQuizId] = useState('');
   const quizIdFromUrl = searchParams.get('quizId') || '';
 
   const studentQuizLink = useMemo(() => {
@@ -200,6 +202,10 @@ export default function CreateQuiz() {
 
     return `${window.location.origin}/quiz/${createdQuiz.id}`;
   }, [createdQuiz]);
+  const selectedSavedQuiz = useMemo(
+    () => savedQuizzes.find((quiz) => quiz.id === selectedSavedQuizId) || null,
+    [savedQuizzes, selectedSavedQuizId]
+  );
 
   useEffect(() => {
     let isActive = true;
@@ -495,6 +501,49 @@ export default function CreateQuiz() {
     setIsLoadingQuizQuestions(false);
   }
 
+  async function deleteSelectedSavedQuiz() {
+    if (!selectedSavedQuiz) {
+      setErrorMessage('Choose a saved quiz to delete.');
+      return;
+    }
+
+    const quizLabel = `${selectedSavedQuiz.course_name || 'Untitled Course'} - ${
+      selectedSavedQuiz.quiz_title || 'Untitled Quiz'
+    }`;
+    const confirmed = window.confirm(
+      `Delete ${quizLabel}? This will permanently delete this saved quiz and its questions.`
+    );
+
+    if (!confirmed) return;
+
+    setDeletingSavedQuizId(selectedSavedQuiz.id);
+    setErrorMessage('');
+    setStatusMessage('');
+    setDraftStatusMessage('');
+
+    try {
+      const { error } = await supabase
+        .from('quiz_templates')
+        .delete()
+        .eq('id', selectedSavedQuiz.id);
+
+      if (error) throw error;
+
+      const nextSavedQuizzes = savedQuizzes.filter(
+        (quiz) => quiz.id !== selectedSavedQuiz.id
+      );
+
+      setSavedQuizzes(nextSavedQuizzes);
+      setSelectedSavedQuizId(nextSavedQuizzes[0]?.id || '');
+      setStatusMessage('Saved quiz deleted.');
+    } catch (error) {
+      console.error('Delete saved quiz error:', error);
+      setErrorMessage(error?.message || 'Unable to delete saved quiz.');
+    } finally {
+      setDeletingSavedQuizId('');
+    }
+  }
+
   function clearLoadedQuizQuestions() {
     const confirmed = window.confirm(
       'Clear the loaded quiz questions and start a blank quiz draft? This will not delete any saved quizzes.'
@@ -635,16 +684,34 @@ export default function CreateQuiz() {
 
     try {
       const userId = await getCurrentUserId();
-      const { data, error } = await supabase
-        .from('quiz_templates')
-        .select('id, course_name, quiz_title, class_date, passing_score, quiz_duration_minutes, created_at')
-        .eq('owner_user_id', userId)
-        .eq('is_active', true)
-        .order('created_at', { ascending: false });
+      const selectActiveQuizzes = (includeSavedFlag) =>
+        supabase
+          .from('quiz_templates')
+          .select(
+            includeSavedFlag
+              ? 'id, course_name, quiz_title, class_date, passing_score, quiz_duration_minutes, results_saved, created_at'
+              : 'id, course_name, quiz_title, class_date, passing_score, quiz_duration_minutes, created_at'
+          )
+          .eq('owner_user_id', userId)
+          .eq('is_active', true)
+          .order('created_at', { ascending: false });
+
+      let { data, error } = await selectActiveQuizzes(true);
+
+      if (error?.message?.includes('results_saved')) {
+        const fallbackResponse = await selectActiveQuizzes(false);
+        data = fallbackResponse.data;
+        error = fallbackResponse.error;
+      }
 
       if (error) throw error;
 
-      setActiveQuizzes(data || []);
+      setActiveQuizzes(
+        (data || []).map((quiz) => ({
+          ...quiz,
+          results_saved: Boolean(quiz.results_saved),
+        }))
+      );
     } catch (error) {
       console.error('Load active quizzes error:', error);
     } finally {
@@ -652,9 +719,53 @@ export default function CreateQuiz() {
     }
   }
 
+  async function saveQuizResults(quiz) {
+    if (quiz.results_saved) return;
+
+    setSavingResultsQuizId(quiz.id);
+    setErrorMessage('');
+    setStatusMessage('');
+
+    try {
+      const { error } = await supabase
+        .from('quiz_templates')
+        .update({ results_saved: true })
+        .eq('id', quiz.id);
+
+      if (error) throw error;
+
+      setActiveQuizzes((currentQuizzes) =>
+        currentQuizzes.map((activeQuiz) =>
+          activeQuiz.id === quiz.id
+            ? { ...activeQuiz, results_saved: true }
+            : activeQuiz
+        )
+      );
+
+      if (createdQuiz?.id === quiz.id) {
+        setCreatedQuiz((currentQuiz) =>
+          currentQuiz ? { ...currentQuiz, results_saved: true } : currentQuiz
+        );
+      }
+
+      setStatusMessage(
+        'Quiz details saved in Quiz Results. Student links and QR codes are not saved there.'
+      );
+    } catch (error) {
+      console.error('Save quiz results error:', error);
+      setErrorMessage(
+        error?.message?.includes('results_saved')
+          ? 'Unable to save quiz results. Run the updated Supabase quiz table SQL first.'
+          : error?.message || 'Unable to save quiz results.'
+      );
+    } finally {
+      setSavingResultsQuizId('');
+    }
+  }
+
   async function cancelQuizSession(quiz) {
     const confirmed = window.confirm(
-      `Cancel ${quiz.course_name || 'this course'} - ${quiz.quiz_title || 'this quiz'}? Students will no longer be able to open or submit it.`
+      `Cancel ${quiz.course_name || 'this course'} - ${quiz.quiz_title || 'this quiz'}? Students will no longer be able to open or submit it. Existing student answers will stay saved.`
     );
 
     if (!confirmed) return;
@@ -681,7 +792,9 @@ export default function CreateQuiz() {
         );
       }
 
-      setStatusMessage('Quiz session canceled. Students can no longer access it.');
+      setStatusMessage(
+        'Quiz session canceled. The student link and QR code are no longer accessible, and existing answers remain saved.'
+      );
     } catch (error) {
       console.error('Cancel quiz session error:', error);
       setErrorMessage(error?.message || 'Unable to cancel quiz session.');
@@ -757,27 +870,23 @@ export default function CreateQuiz() {
           </div>
         )}
 
-        <section className="active-quiz-panel">
-          <div className="quiz-section-header">
-            <div>
-              <h2>Active Quiz Sessions</h2>
-              <p>Published quizzes students can open right now.</p>
+        {activeQuizzes.length > 0 && (
+          <section className="active-quiz-panel">
+            <div className="quiz-section-header">
+              <div>
+                <h2>Active Quiz Sessions</h2>
+                <p>Published quizzes students can open right now.</p>
+              </div>
+              <button
+                type="button"
+                className="secondary-button compact-button"
+                onClick={loadActiveQuizzes}
+                disabled={isLoadingActiveQuizzes}
+              >
+                {isLoadingActiveQuizzes ? 'Refreshing...' : 'Refresh'}
+              </button>
             </div>
-            <button
-              type="button"
-              className="secondary-button compact-button"
-              onClick={loadActiveQuizzes}
-              disabled={isLoadingActiveQuizzes}
-            >
-              {isLoadingActiveQuizzes ? 'Refreshing...' : 'Refresh'}
-            </button>
-          </div>
 
-          {isLoadingActiveQuizzes ? (
-            <p className="muted">Loading active quizzes...</p>
-          ) : activeQuizzes.length === 0 ? (
-            <p className="muted">No active quiz sessions.</p>
-          ) : (
             <div className="active-quiz-list">
               {activeQuizzes.map((quiz) => (
                 <div
@@ -804,22 +913,41 @@ export default function CreateQuiz() {
                       <span>Time: {formatDuration(quiz.quiz_duration_minutes || 30)}</span>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    className="secondary-button quiz-cancel-button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      cancelQuizSession(quiz);
-                    }}
-                    disabled={cancelingQuizId === quiz.id}
-                  >
-                    {cancelingQuizId === quiz.id ? 'Canceling...' : 'Cancel Session'}
-                  </button>
+                  <div className="active-quiz-actions">
+                    <button
+                      type="button"
+                      className="secondary-button quiz-save-results-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        saveQuizResults(quiz);
+                      }}
+                      disabled={
+                        quiz.results_saved || savingResultsQuizId === quiz.id
+                      }
+                    >
+                      {quiz.results_saved
+                        ? 'Results Saved'
+                        : savingResultsQuizId === quiz.id
+                          ? 'Saving...'
+                          : 'Save Quiz Results'}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button quiz-cancel-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        cancelQuizSession(quiz);
+                      }}
+                      disabled={cancelingQuizId === quiz.id}
+                    >
+                      {cancelingQuizId === quiz.id ? 'Canceling...' : 'Cancel Session'}
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
-          )}
-        </section>
+          </section>
+        )}
 
         {!createdQuiz ? (
           <form className="quiz-form" onSubmit={handleSubmit}>
@@ -860,6 +988,42 @@ export default function CreateQuiz() {
                       ))
                     )}
                   </select>
+
+                  <button
+                    type="button"
+                    className="quiz-delete-icon-button saved-quiz-delete-button"
+                    aria-label={
+                      selectedSavedQuiz
+                        ? `Delete ${selectedSavedQuiz.course_name || 'Untitled Course'} - ${
+                            selectedSavedQuiz.quiz_title || 'Untitled Quiz'
+                          }`
+                        : 'Delete saved quiz'
+                    }
+                    title="Delete saved quiz"
+                    onClick={deleteSelectedSavedQuiz}
+                    disabled={
+                      !selectedSavedQuizId ||
+                      deletingSavedQuizId === selectedSavedQuizId
+                    }
+                  >
+                    <svg
+                      aria-hidden="true"
+                      viewBox="0 0 24 24"
+                      width="18"
+                      height="18"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M3 6h18" />
+                      <path d="M8 6V4h8v2" />
+                      <path d="M19 6l-1 14H6L5 6" />
+                      <path d="M10 11v5" />
+                      <path d="M14 11v5" />
+                    </svg>
+                  </button>
 
                   <button
                     type="button"
@@ -1127,37 +1291,39 @@ export default function CreateQuiz() {
               </dl>
             </div>
 
-            <div className="student-link-box">
-              <label htmlFor="studentQuizLink">Student Quiz Link</label>
-              <div className="copy-row">
-                <input id="studentQuizLink" type="text" value={studentQuizLink} readOnly />
-                <button type="button" onClick={handleCopyLink}>
-                  {copied ? 'Copied' : 'Copy Quiz Link'}
-                </button>
-              </div>
-            </div>
-
             {createdQuiz.is_active === false ? (
               <div className="alert alert-error" role="status">
-                This quiz session is canceled. Students can no longer open it.
+                This quiz session is canceled. The student link and QR code are no longer accessible.
               </div>
             ) : (
-              <div className="qr-code-box">
-                <div className="qr-code-image" ref={qrCodeRef}>
-                  <QRCodeCanvas value={studentQuizLink} size={220} level="M" marginSize={4} />
+              <>
+                <div className="student-link-box">
+                  <label htmlFor="studentQuizLink">Student Quiz Link</label>
+                  <div className="copy-row">
+                    <input id="studentQuizLink" type="text" value={studentQuizLink} readOnly />
+                    <button type="button" onClick={handleCopyLink}>
+                      {copied ? 'Copied' : 'Copy Quiz Link'}
+                    </button>
+                  </div>
                 </div>
-                <div className="qr-code-copy">
-                  <h2>Student QR Code</h2>
-                  <p>Students can scan this QR code to open the quiz.</p>
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={handleDownloadQrCode}
-                  >
-                    Download QR Code
-                  </button>
+
+                <div className="qr-code-box">
+                  <div className="qr-code-image" ref={qrCodeRef}>
+                    <QRCodeCanvas value={studentQuizLink} size={220} level="M" marginSize={4} />
+                  </div>
+                  <div className="qr-code-copy">
+                    <h2>Student QR Code</h2>
+                    <p>Students can scan this QR code to open the quiz.</p>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={handleDownloadQrCode}
+                    >
+                      Download QR Code
+                    </button>
+                  </div>
                 </div>
-              </div>
+              </>
             )}
 
             <div className="action-row">
@@ -1166,6 +1332,21 @@ export default function CreateQuiz() {
                   Open Student Quiz
                 </a>
               )}
+              <button
+                type="button"
+                className="secondary-button quiz-save-results-button"
+                onClick={() => saveQuizResults(createdQuiz)}
+                disabled={
+                  createdQuiz.results_saved ||
+                  savingResultsQuizId === createdQuiz.id
+                }
+              >
+                {createdQuiz.results_saved
+                  ? 'Results Saved'
+                  : savingResultsQuizId === createdQuiz.id
+                    ? 'Saving...'
+                    : 'Save Quiz Results'}
+              </button>
               <Link
                 className="secondary-link-button"
                 to={`/quiz-results-7392?quizId=${createdQuiz.id}`}

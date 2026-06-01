@@ -40,7 +40,6 @@ export default function Login() {
     <section className="login-page">
       <div className="login-card">
         <div className="login-header">
-          <p className="eyebrow">Instructor Access</p>
           <h2>Login</h2>
         </div>
 

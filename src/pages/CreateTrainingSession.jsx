@@ -383,7 +383,6 @@ export default function CreateTrainingSession() {
     <section className="create-session-page">
       <div className="create-session-card">
         <div className="create-session-header">
-          <p className="eyebrow">Instructor Setup</p>
           <h1>Create Training Session</h1>
           <p>
             Enter the class details once. Students will use the generated link

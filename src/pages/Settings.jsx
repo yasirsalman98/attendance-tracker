@@ -102,8 +102,10 @@ export default function Settings() {
     walletCards: false,
     certificateTemplate: false,
     quizzes: false,
+    savedQuizResults: false,
   });
   const [templateDesigns, setTemplateDesigns] = useState({
+    walletCardDesign: 'excourse',
     walletFront: 'same',
     walletBack: 'same',
     certificateTemplate: 'same',
@@ -130,6 +132,7 @@ export default function Settings() {
     walletCards: false,
     certificateTemplate: false,
     quizzes: false,
+    savedQuizResults: false,
   });
   const [featureTemplateDesigns, setFeatureTemplateDesigns] = useState({
     walletCardDesign: 'excourse',
@@ -195,8 +198,10 @@ export default function Settings() {
       walletCards: false,
       certificateTemplate: false,
       quizzes: false,
+      savedQuizResults: false,
     });
     setTemplateDesigns({
+      walletCardDesign: 'excourse',
       walletFront: 'same',
       walletBack: 'same',
       certificateTemplate: 'same',
@@ -289,8 +294,10 @@ export default function Settings() {
       });
       setUsers(data?.users || []);
       setStatus(
-        data?.importedQuizCount
-          ? `Email added. ${data.importedQuizCount} quizzes imported.`
+        data?.importedQuizCount || data?.importedSavedResultCount
+          ? `Email added. ${data.importedQuizCount || 0} saved quizzes and ${
+              data.importedSavedResultCount || 0
+            } saved quiz results imported.`
           : 'Email added. The user can now log in with the password you set.'
       );
     } catch (error) {
@@ -358,6 +365,7 @@ export default function Settings() {
       walletCards: Boolean(user.imported_assets?.walletCards),
       certificateTemplate: Boolean(user.imported_assets?.certificateTemplate),
       quizzes: Boolean(user.imported_assets?.quizzes),
+      savedQuizResults: Boolean(user.imported_assets?.savedQuizResults),
     });
     setFeatureTemplateDesigns({
       walletCardDesign: user.template_designs?.walletCardDesign || 'excourse',
@@ -396,6 +404,12 @@ export default function Settings() {
           : optionName === 'quizzes'
             ? checked
             : currentOptions.quizzes,
+      savedQuizResults:
+        optionName === 'none'
+          ? false
+          : optionName === 'savedQuizResults'
+            ? checked
+            : currentOptions.savedQuizResults,
     }));
   }
 
@@ -445,8 +459,10 @@ export default function Settings() {
       setUsers(data?.users || []);
       setFeatureTargetUser(null);
       setStatus(
-        data?.importedQuizCount
-          ? `Features updated. ${data.importedQuizCount} saved quizzes added to that email's Load Saved Quiz Questions dropdown.`
+        data?.importedQuizCount || data?.importedSavedResultCount
+          ? `Features updated. ${data.importedQuizCount || 0} saved quizzes and ${
+              data.importedSavedResultCount || 0
+            } saved quiz results imported.`
           : 'Features updated.'
       );
     } catch (error) {
@@ -479,6 +495,12 @@ export default function Settings() {
           : optionName === 'quizzes'
             ? checked
             : currentOptions.quizzes,
+      savedQuizResults:
+        optionName === 'none'
+          ? false
+          : optionName === 'savedQuizResults'
+            ? checked
+            : currentOptions.savedQuizResults,
     }));
   }
 
@@ -546,11 +568,10 @@ export default function Settings() {
       <div className="quiz-card settings-card">
         <div className="admin-header">
           <div>
-            <p className="eyebrow">Instructor Settings</p>
             <h2>Login Emails</h2>
             <p className="muted">
-              Manage which emails can log in to ExCourse. That email only sees
-              the sessions and quizzes they create.
+              Manage which emails can log in to ExCourse. Users only see the
+              sessions and quizzes they create.
             </p>
           </div>
 
@@ -819,7 +840,8 @@ export default function Settings() {
                     checked={
                       !featureOptions.walletCards &&
                       !featureOptions.certificateTemplate &&
-                      !featureOptions.quizzes
+                      !featureOptions.quizzes &&
+                      !featureOptions.savedQuizResults
                     }
                     onChange={(event) =>
                       updateFeatureOption('none', event.target.checked)
@@ -897,6 +919,16 @@ export default function Settings() {
                   />
                   Saved quiz library
                 </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={featureOptions.savedQuizResults}
+                    onChange={(event) =>
+                      updateFeatureOption('savedQuizResults', event.target.checked)
+                    }
+                  />
+                  Saved quiz results
+                </label>
               </div>
 
               <div className="quiz-confirm-actions">
@@ -955,6 +987,21 @@ export default function Settings() {
                 </label>
                 {importOptions.walletCards && (
                   <div className="settings-design-options">
+                    <label className="settings-design-select">
+                      Wallet card design
+                      <select
+                        value={templateDesigns.walletCardDesign}
+                        onChange={(event) =>
+                          updateTemplateDesign(
+                            'walletCardDesign',
+                            event.target.value
+                          )
+                        }
+                      >
+                        <option value="excourse">ExCourse wallet cards</option>
+                        <option value="bowman">Bowman Steel wallet cards</option>
+                      </select>
+                    </label>
                     <label>
                       <input
                         type="radio"
@@ -1086,6 +1133,16 @@ export default function Settings() {
                     }
                   />
                   Quizzes
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={importOptions.savedQuizResults}
+                    onChange={(event) =>
+                      updateImportOption('savedQuizResults', event.target.checked)
+                    }
+                  />
+                  Saved quiz results
                 </label>
               </div>
 

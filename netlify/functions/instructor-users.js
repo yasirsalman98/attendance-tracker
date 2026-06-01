@@ -66,6 +66,7 @@ function normalizeImportOptions(importOptions) {
     walletCards: Boolean(importOptions?.walletCards),
     certificateTemplate: Boolean(importOptions?.certificateTemplate),
     quizzes: Boolean(importOptions?.quizzes),
+    savedQuizResults: Boolean(importOptions?.savedQuizResults),
   };
 }
 
@@ -584,6 +585,260 @@ async function removeSavedLibraryCopiesFromUsers(adminClient, sourceUsers, targe
   }
 }
 
+async function getSavedResultQuizKeys(adminClient, sourceUserId) {
+  const { data, error } = await adminClient
+    .from('quiz_templates')
+    .select('course_name, quiz_title')
+    .eq('owner_user_id', sourceUserId)
+    .eq('results_saved', true);
+
+  if (error) throw error;
+
+  return (data || []).map((quiz) => ({
+    courseName: quiz.course_name,
+    quizTitle: quiz.quiz_title,
+  }));
+}
+
+async function removeSavedResultCopies(adminClient, sourceUserId, targetUserId) {
+  const savedResultQuizKeys = await getSavedResultQuizKeys(adminClient, sourceUserId);
+
+  for (const quizKey of savedResultQuizKeys) {
+    const { error } = await adminClient
+      .from('quiz_templates')
+      .delete()
+      .eq('owner_user_id', targetUserId)
+      .eq('course_name', quizKey.courseName)
+      .eq('quiz_title', quizKey.quizTitle)
+      .eq('results_saved', true);
+
+    if (error) throw error;
+  }
+}
+
+async function removeSavedResultCopiesFromUsers(adminClient, sourceUsers, targetUserId) {
+  for (const sourceUser of sourceUsers) {
+    if (sourceUser.id === targetUserId) continue;
+    await removeSavedResultCopies(adminClient, sourceUser.id, targetUserId);
+  }
+}
+
+async function copySavedQuizResultsToUser(adminClient, sourceUserId, targetUserId) {
+  const { data: quizzes, error } = await adminClient
+    .from('quiz_templates')
+    .select(`
+      course_name,
+      quiz_title,
+      quiz_description,
+      instructor_name,
+      class_date,
+      passing_score,
+      quiz_duration_minutes,
+      quiz_questions (
+        id,
+        question_text,
+        question_type,
+        sort_order,
+        quiz_answer_choices (
+          id,
+          choice_text,
+          is_correct,
+          sort_order
+        )
+      ),
+      quiz_attempts (
+        id,
+        student_name,
+        student_email,
+        company,
+        score,
+        total_questions,
+        percentage,
+        passed,
+        submitted_at,
+        quiz_attempt_answers (
+          question_id,
+          selected_choice_ids,
+          is_correct
+        )
+      )
+    `)
+    .eq('owner_user_id', sourceUserId)
+    .eq('results_saved', true)
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+
+  let copiedCount = 0;
+
+  for (const quiz of quizzes || []) {
+    const { data: existingCopies, error: existingCopyError } = await adminClient
+      .from('quiz_templates')
+      .select('id')
+      .eq('owner_user_id', targetUserId)
+      .eq('course_name', quiz.course_name)
+      .eq('quiz_title', quiz.quiz_title)
+      .eq('results_saved', true)
+      .limit(1);
+
+    if (existingCopyError) throw existingCopyError;
+    if ((existingCopies || []).length > 0) continue;
+
+    let { data: copiedQuiz, error: quizError } = await adminClient
+      .from('quiz_templates')
+      .insert({
+        course_name: quiz.course_name,
+        quiz_title: quiz.quiz_title,
+        quiz_description: quiz.quiz_description,
+        instructor_name: quiz.instructor_name,
+        class_date: quiz.class_date,
+        passing_score: quiz.passing_score,
+        quiz_duration_minutes: quiz.quiz_duration_minutes || 30,
+        is_active: false,
+        is_saved_template: false,
+        results_saved: true,
+        owner_user_id: targetUserId,
+      })
+      .select('id')
+      .single();
+
+    if (isMissingSavedTemplateColumn(quizError)) {
+      const fallbackResponse = await adminClient
+        .from('quiz_templates')
+        .insert({
+          course_name: quiz.course_name,
+          quiz_title: quiz.quiz_title,
+          quiz_description: quiz.quiz_description,
+          instructor_name: quiz.instructor_name,
+          class_date: quiz.class_date,
+          passing_score: quiz.passing_score,
+          quiz_duration_minutes: quiz.quiz_duration_minutes || 30,
+          is_active: false,
+          results_saved: true,
+          owner_user_id: targetUserId,
+        })
+        .select('id')
+        .single();
+
+      copiedQuiz = fallbackResponse.data;
+      quizError = fallbackResponse.error;
+    }
+
+    if (quizError) throw quizError;
+
+    const questionIdMap = new Map();
+    const choiceIdMap = new Map();
+    const questions = [...(quiz.quiz_questions || [])].sort(
+      (left, right) => left.sort_order - right.sort_order
+    );
+
+    for (const question of questions) {
+      const { data: copiedQuestion, error: questionError } = await adminClient
+        .from('quiz_questions')
+        .insert({
+          quiz_template_id: copiedQuiz.id,
+          question_text: question.question_text,
+          question_type: question.question_type,
+          sort_order: question.sort_order,
+        })
+        .select('id')
+        .single();
+
+      if (questionError) throw questionError;
+
+      questionIdMap.set(question.id, copiedQuestion.id);
+
+      const choices = [...(question.quiz_answer_choices || [])].sort(
+        (left, right) => left.sort_order - right.sort_order
+      );
+
+      for (const choice of choices) {
+        const { data: copiedChoice, error: choiceError } = await adminClient
+          .from('quiz_answer_choices')
+          .insert({
+            question_id: copiedQuestion.id,
+            choice_text: choice.choice_text,
+            is_correct: choice.is_correct,
+            sort_order: choice.sort_order,
+          })
+          .select('id')
+          .single();
+
+        if (choiceError) throw choiceError;
+        choiceIdMap.set(choice.id, copiedChoice.id);
+      }
+    }
+
+    const attempts = [...(quiz.quiz_attempts || [])].sort(
+      (left, right) => new Date(left.submitted_at) - new Date(right.submitted_at)
+    );
+
+    for (const attempt of attempts) {
+      const { data: copiedAttempt, error: attemptError } = await adminClient
+        .from('quiz_attempts')
+        .insert({
+          quiz_template_id: copiedQuiz.id,
+          student_name: attempt.student_name,
+          student_email: attempt.student_email,
+          company: attempt.company,
+          score: attempt.score,
+          total_questions: attempt.total_questions,
+          percentage: attempt.percentage,
+          passed: attempt.passed,
+          submitted_at: attempt.submitted_at,
+        })
+        .select('id')
+        .single();
+
+      if (attemptError) throw attemptError;
+
+      const copiedAnswers = (attempt.quiz_attempt_answers || [])
+        .map((answer) => {
+          const selectedChoiceIds = Array.isArray(answer.selected_choice_ids)
+            ? answer.selected_choice_ids
+            : [];
+
+          return {
+            quiz_attempt_id: copiedAttempt.id,
+            question_id: questionIdMap.get(answer.question_id),
+            selected_choice_ids: selectedChoiceIds.map(
+              (choiceId) => choiceIdMap.get(choiceId) || choiceId
+            ),
+            is_correct: answer.is_correct,
+          };
+        })
+        .filter((answer) => answer.question_id);
+
+      if (copiedAnswers.length > 0) {
+        const { error: answersError } = await adminClient
+          .from('quiz_attempt_answers')
+          .insert(copiedAnswers);
+
+        if (answersError) throw answersError;
+      }
+    }
+
+    copiedCount += 1;
+  }
+
+  return copiedCount;
+}
+
+async function copySavedQuizResultsFromUsers(adminClient, sourceUsers, targetUserId) {
+  let copiedCount = 0;
+
+  for (const sourceUser of sourceUsers) {
+    if (sourceUser.id === targetUserId) continue;
+    copiedCount += await copySavedQuizResultsToUser(
+      adminClient,
+      sourceUser.id,
+      targetUserId
+    );
+  }
+
+  return copiedCount;
+}
+
 async function getCurrentUser(event) {
   const anonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
   const authHeader = event.headers.authorization || event.headers.Authorization || '';
@@ -669,6 +924,7 @@ export async function handler(event) {
 
       const createdUser = createdUserData?.user;
       let importedQuizCount = 0;
+      let importedSavedResultCount = 0;
 
       try {
         let customTemplates = {};
@@ -708,6 +964,19 @@ export async function handler(event) {
             createdUser.id
           );
         }
+
+        if (importOptions.savedQuizResults && createdUser?.id) {
+          const sourceUsers = await getUsersByEmails(
+            adminClient,
+            legacyQuizOwnerEmails
+          );
+
+          importedSavedResultCount = await copySavedQuizResultsFromUsers(
+            adminClient,
+            sourceUsers,
+            createdUser.id
+          );
+        }
       } catch (copyError) {
         if (createdUser?.id) {
           await deleteOwnedData(adminClient, createdUser.id).catch((cleanupError) => {
@@ -724,6 +993,7 @@ export async function handler(event) {
       return jsonResponse(200, {
         users: await listUsers(adminClient),
         importedQuizCount,
+        importedSavedResultCount,
       });
     }
 
@@ -791,6 +1061,7 @@ export async function handler(event) {
         if (metadataError) throw metadataError;
 
         let importedQuizCount = 0;
+        let importedSavedResultCount = 0;
 
         const sourceUsers = await getUsersByEmails(
           adminClient,
@@ -813,9 +1084,26 @@ export async function handler(event) {
           );
         }
 
+        if (nextAssets.savedQuizResults) {
+          importedSavedResultCount = await copySavedQuizResultsFromUsers(
+            adminClient,
+            sourceUsers,
+            existingUser.id
+          );
+        }
+
+        if (!nextAssets.savedQuizResults) {
+          await removeSavedResultCopiesFromUsers(
+            adminClient,
+            sourceUsers,
+            existingUser.id
+          );
+        }
+
         return jsonResponse(200, {
           users: await listUsers(adminClient),
           importedQuizCount,
+          importedSavedResultCount,
         });
       }
 

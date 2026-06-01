@@ -147,6 +147,12 @@ export default function StudentQuiz() {
       (left, right) => left.sort_order - right.sort_order
     );
   }, [quiz]);
+  const orderedQuestionResults = useMemo(() => {
+    return [...(result?.questionResults || [])].sort((left, right) => {
+      if (left.isCorrect === right.isCorrect) return 0;
+      return left.isCorrect ? 1 : -1;
+    });
+  }, [result?.questionResults]);
 
   useEffect(() => {
     let isActive = true;
@@ -305,14 +311,17 @@ export default function StudentQuiz() {
         const questionIds = orderedQuestions.map((question) => question.id);
         const { data: answerKeyRows, error: answerKeyError } = await supabase
           .from('quiz_answer_choices')
-          .select('id, question_id, is_correct')
+          .select('id, question_id, choice_text, is_correct')
           .in('question_id', questionIds);
 
         if (answerKeyError) throw answerKeyError;
 
         const correctChoiceIdsByQuestion = new Map();
+        const choiceTextById = new Map();
 
         answerKeyRows.forEach((choice) => {
+          choiceTextById.set(choice.id, choice.choice_text || '');
+
           if (!choice.is_correct) return;
 
           const currentIds = correctChoiceIdsByQuestion.get(choice.question_id) || [];
@@ -331,7 +340,14 @@ export default function StudentQuiz() {
 
           return {
             questionId: question.id,
+            questionText: question.question_text || '',
             selectedChoiceIds,
+            selectedAnswers: selectedChoiceIds.map(
+              (choiceId) => choiceTextById.get(choiceId) || 'Unknown answer'
+            ),
+            correctAnswers: correctChoiceIds.map(
+              (choiceId) => choiceTextById.get(choiceId) || 'Unknown answer'
+            ),
             isCorrect,
           };
         });
@@ -406,7 +422,11 @@ export default function StudentQuiz() {
 
         if (answersError) throw answersError;
 
-        const submittedResult = { ...attempt, submitted_at: submittedAt };
+        const submittedResult = {
+          ...attempt,
+          submitted_at: submittedAt,
+          questionResults: gradedAnswers,
+        };
 
         window.localStorage.setItem(
           getStoredAttemptKey(quiz.id, attempt.id),
@@ -713,6 +733,48 @@ export default function StudentQuiz() {
             <dd>{formatDateTime(result.submitted_at)}</dd>
           </div>
         </dl>
+
+        {orderedQuestionResults.length > 0 && (
+          <section className="student-result-review">
+            <h3>Question Results</h3>
+            <div className="student-result-question-list">
+              {orderedQuestionResults.map((question, questionIndex) => (
+                <article
+                  className={`student-result-question ${
+                    question.isCorrect ? 'is-correct' : 'is-missed'
+                  }`}
+                  key={question.questionId}
+                >
+                  <div className="student-result-question-header">
+                    <strong>
+                      {questionIndex + 1}. {question.questionText}
+                    </strong>
+                    <span>{question.isCorrect ? 'Correct' : 'Missed'}</span>
+                  </div>
+
+                  <dl>
+                    <div>
+                      <dt>Your answer</dt>
+                      <dd>
+                        {question.selectedAnswers?.length
+                          ? question.selectedAnswers.join('; ')
+                          : 'No answer'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Correct answer</dt>
+                      <dd>
+                        {question.correctAnswers?.length
+                          ? question.correctAnswers.join('; ')
+                          : 'Not provided'}
+                      </dd>
+                    </div>
+                  </dl>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
 
         <button type="button" onClick={downloadCompletionReport}>
           Download Completion Report

@@ -6,7 +6,6 @@ export default function InstructorDashboard() {
     <section className="quiz-page">
       <div className="quiz-card">
         <div className="quiz-header">
-          <p className="eyebrow">Instructor Setup</p>
           <h1>Instructor Dashboard</h1>
           <p>Choose what you want to create for this class.</p>
         </div>

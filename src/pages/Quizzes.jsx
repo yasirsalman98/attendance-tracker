@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
+import { downloadQuizResultsExcel } from '../quizResultsExcel';
 import './Quiz.css';
 
 function formatDate(value) {
@@ -125,7 +126,7 @@ function isOriginalSavedQuizTemplate(quiz) {
   const quizTitle = (quiz.quiz_title || '').trim();
   const isSavedTemplate =
     'is_saved_template' in quiz
-      ? quiz.is_saved_template !== false
+      ? quiz.is_saved_template === true
       : quiz.is_active === false && !quiz.results_saved;
 
   return isSavedTemplate && !/\bcopy$/i.test(quizTitle);
@@ -144,6 +145,7 @@ export default function Quizzes() {
   const [deletingCopiedQuizId, setDeletingCopiedQuizId] = useState('');
   const [savedResultQuizzes, setSavedResultQuizzes] = useState([]);
   const [isLoadingSavedResults, setIsLoadingSavedResults] = useState(false);
+  const [downloadingResultsQuizId, setDownloadingResultsQuizId] = useState('');
   const [deletingSavedResultQuizId, setDeletingSavedResultQuizId] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
@@ -203,6 +205,61 @@ export default function Quizzes() {
       setIsLoadingSavedResults(false);
     }
   }, []);
+
+  async function downloadSavedQuizResults(quiz) {
+    setDownloadingResultsQuizId(quiz.id);
+    setErrorMessage('');
+    setStatusMessage('');
+
+    try {
+      const userId = await getCurrentUserId();
+      const { data: fullQuiz, error: quizError } = await supabase
+        .from('quiz_templates')
+        .select(`
+          *,
+          quiz_questions (
+            id,
+            question_text,
+            sort_order,
+            quiz_answer_choices (
+              id,
+              choice_text,
+              is_correct,
+              sort_order
+            )
+          )
+        `)
+        .eq('id', quiz.id)
+        .eq('owner_user_id', userId)
+        .single();
+
+      if (quizError) throw quizError;
+
+      const { data: attempts, error: attemptsError } = await supabase
+        .from('quiz_attempts')
+        .select(`
+          *,
+          quiz_attempt_answers (
+            id,
+            question_id,
+            selected_choice_ids,
+            is_correct
+          )
+        `)
+        .eq('quiz_template_id', quiz.id)
+        .order('submitted_at', { ascending: false });
+
+      if (attemptsError) throw attemptsError;
+
+      await downloadQuizResultsExcel(fullQuiz, attempts || []);
+      setStatusMessage('Quiz results Excel downloaded.');
+    } catch (error) {
+      console.error('Download quiz results error:', error);
+      setErrorMessage(error?.message || 'Unable to download quiz results.');
+    } finally {
+      setDownloadingResultsQuizId('');
+    }
+  }
 
   async function deleteSavedQuizResult(quiz) {
     const quizLabel = `${quiz.course_name || 'Untitled Course'} - ${
@@ -324,9 +381,8 @@ export default function Quizzes() {
     <section className="quiz-page">
       <div className="quiz-card">
         <div className="quiz-header">
-          <p className="eyebrow">Instructor Quizzes</p>
           <h1>Quizzes</h1>
-          <p>Review saved quiz results or create a new quiz session.</p>
+          <p>Review saved quiz results. Edit saved quiz questions and answers.</p>
         </div>
 
         <div className="quiz-nav-row quizzes-nav-row">
@@ -361,7 +417,6 @@ export default function Quizzes() {
           <div className="quiz-section-header">
             <div>
               <h2>Saved Quizzes</h2>
-              <p>Edit saved quiz questions and answers.</p>
             </div>
           </div>
 
@@ -431,7 +486,6 @@ export default function Quizzes() {
           <div className="quiz-section-header">
             <div>
               <h2>Saved Quiz Results</h2>
-              <p>Quizzes saved for results review.</p>
             </div>
           </div>
 
@@ -461,6 +515,16 @@ export default function Quizzes() {
                     >
                       View Results
                     </Link>
+                    <button
+                      type="button"
+                      className="secondary-button compact-link-button"
+                      onClick={() => downloadSavedQuizResults(quiz)}
+                      disabled={downloadingResultsQuizId === quiz.id}
+                    >
+                      {downloadingResultsQuizId === quiz.id
+                        ? 'Downloading...'
+                        : 'Download Results'}
+                    </button>
                     <button
                       type="button"
                       className="quiz-delete-icon-button"

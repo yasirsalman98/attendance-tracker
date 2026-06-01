@@ -36,6 +36,38 @@ function formatDuration(minutes) {
     : hourLabel;
 }
 
+function formatRemainingTime(totalSeconds) {
+  const seconds = Math.max(0, Number(totalSeconds || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  const paddedMinutes = String(minutes).padStart(hours ? 2 : 1, '0');
+  const paddedSeconds = String(remainingSeconds).padStart(2, '0');
+
+  return hours
+    ? `${hours}:${paddedMinutes}:${paddedSeconds}`
+    : `${paddedMinutes}:${paddedSeconds}`;
+}
+
+function getQuizRemainingSeconds(quiz) {
+  if (!quiz?.created_at) return null;
+
+  const startedAt = new Date(quiz.created_at).getTime();
+  const durationMinutes = Number(quiz.quiz_duration_minutes || 30);
+
+  if (
+    Number.isNaN(startedAt) ||
+    !Number.isFinite(durationMinutes) ||
+    durationMinutes <= 0
+  ) {
+    return null;
+  }
+
+  const deadline = startedAt + durationMinutes * 60 * 1000;
+
+  return Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+}
+
 function delay(ms) {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
@@ -95,7 +127,7 @@ function mapSavedQuizQuestions(savedQuiz, { hideAnswersInEditor = false } = {}) 
 
 function isReusableSavedQuiz(quiz) {
   if ('is_saved_template' in quiz) {
-    return quiz.is_saved_template !== false;
+    return quiz.is_saved_template === true;
   }
 
   return quiz.is_active === false && !quiz.results_saved;
@@ -216,7 +248,6 @@ export default function CreateQuiz() {
   const [copied, setCopied] = useState(false);
   const [savedQuizzes, setSavedQuizzes] = useState([]);
   const [selectedSavedQuizId, setSelectedSavedQuizId] = useState('');
-  const [showLoadQuizPanel, setShowLoadQuizPanel] = useState(false);
   const [isLoadingSavedQuizzes, setIsLoadingSavedQuizzes] = useState(false);
   const [isLoadingQuizQuestions, setIsLoadingQuizQuestions] = useState(false);
   const [activeQuizzes, setActiveQuizzes] = useState([]);
@@ -224,9 +255,12 @@ export default function CreateQuiz() {
   const [liveQuizDetails, setLiveQuizDetails] = useState(null);
   const [liveAttempts, setLiveAttempts] = useState([]);
   const [liveResultsError, setLiveResultsError] = useState('');
+  const [liveRemainingSeconds, setLiveRemainingSeconds] = useState(null);
   const [savingResultsQuizId, setSavingResultsQuizId] = useState('');
   const [deletingSessionId, setDeletingSessionId] = useState('');
   const lastScrolledQuizIdRef = useRef('');
+  const autoSaveExpiredQuizIdRef = useRef('');
+  const saveQuizResultsRef = useRef(null);
   const quizIdFromUrl = searchParams.get('quizId') || '';
   const editQuizIdFromUrl = searchParams.get('editQuizId') || '';
   const isEditingSavedQuiz = Boolean(editQuizIdFromUrl);
@@ -247,6 +281,7 @@ export default function CreateQuiz() {
     () => getQuizResultSummary(liveQuizForResults, liveAttempts),
     [liveAttempts, liveQuizForResults]
   );
+  saveQuizResultsRef.current = saveQuizResults;
 
   const loadLiveSessionResults = useCallback(
     async function loadLiveSessionResults(quizId = createdQuiz?.id) {
@@ -433,7 +468,10 @@ export default function CreateQuiz() {
 
   useEffect(() => {
     loadActiveQuizzes();
-  }, []);
+    if (!isEditingSavedQuiz) {
+      loadSavedQuizzes();
+    }
+  }, [isEditingSavedQuiz]);
 
   useEffect(() => {
     if (!createdQuiz?.id) {
@@ -452,6 +490,21 @@ export default function CreateQuiz() {
       return undefined;
     }
 
+    async function updateLiveCountdown() {
+      const nextRemainingSeconds = getQuizRemainingSeconds(createdQuiz);
+      setLiveRemainingSeconds(nextRemainingSeconds);
+
+      if (
+        nextRemainingSeconds === 0 &&
+        autoSaveExpiredQuizIdRef.current !== createdQuiz.id
+      ) {
+        autoSaveExpiredQuizIdRef.current = createdQuiz.id;
+        await saveQuizResultsRef.current?.(createdQuiz);
+      }
+    }
+
+    const countdownInitialLoadId = window.setTimeout(updateLiveCountdown, 0);
+    const countdownIntervalId = window.setInterval(updateLiveCountdown, 1000);
     const initialLoadId = window.setTimeout(() => {
       loadLiveSessionResults(createdQuiz.id);
     }, 0);
@@ -461,10 +514,17 @@ export default function CreateQuiz() {
     }, 3000);
 
     return () => {
+      window.clearTimeout(countdownInitialLoadId);
+      window.clearInterval(countdownIntervalId);
       window.clearTimeout(initialLoadId);
       window.clearInterval(intervalId);
     };
-  }, [createdQuiz?.id, createdQuiz?.is_active, loadLiveSessionResults]);
+  }, [
+    createdQuiz,
+    createdQuiz?.id,
+    createdQuiz?.is_active,
+    loadLiveSessionResults,
+  ]);
 
   function updateQuestion(questionId, updates) {
     setQuestions((currentQuestions) =>
@@ -622,7 +682,6 @@ export default function CreateQuiz() {
   }
 
   async function loadSavedQuizzes() {
-    setShowLoadQuizPanel(true);
     setErrorMessage('');
     setStatusMessage('Loading saved quizzes...');
     setDraftStatusMessage('');
@@ -1228,9 +1287,6 @@ export default function CreateQuiz() {
     <section className="quiz-page">
       <div className="quiz-card">
         <div className="quiz-header">
-          <p className="eyebrow">
-            {createdQuiz ? 'Instructor Session' : 'Instructor Setup'}
-          </p>
           <h1>
             {createdQuiz
               ? 'Live Quiz Session'
@@ -1243,7 +1299,7 @@ export default function CreateQuiz() {
               ? 'Share this quiz with students and monitor results in real time.'
               : isEditingSavedQuiz
               ? 'Edit saved quiz questions, answer choices, and correct answers.'
-              : 'Build a simple quiz, mark the correct answers, and generate a student link with a QR code.'}
+              : 'Load a quiz or build a quiz, mark the correct answers, and generate a student link with a QR code.'}
           </p>
         </div>
 
@@ -1360,59 +1416,46 @@ export default function CreateQuiz() {
               <section className="load-quiz-panel">
               <div>
                 <h2>Load Saved Quiz Questions</h2>
-                <p>
-                  Reuse questions from saved quizzes available to this email,
-                  then edit and save them as a new quiz.
-                </p>
               </div>
 
-              {!showLoadQuizPanel ? (
+              <div className="load-quiz-row">
+                <select
+                  value={selectedSavedQuizId}
+                  onChange={(event) => setSelectedSavedQuizId(event.target.value)}
+                  disabled={isLoadingSavedQuizzes || savedQuizzes.length === 0}
+                  aria-label="Saved quizzes"
+                >
+                  {isLoadingSavedQuizzes ? (
+                    <option value="">Loading saved quizzes...</option>
+                  ) : savedQuizzes.length === 0 ? (
+                    <option value="">No saved quizzes found</option>
+                  ) : (
+                    savedQuizzes.map((quiz) => (
+                      <option key={quiz.id} value={quiz.id}>
+                        {quiz.course_name} - {quiz.quiz_title}
+                        {quiz.is_active ? '' : ' (Draft)'}
+                      </option>
+                    ))
+                  )}
+                </select>
+
                 <button
                   type="button"
                   className="secondary-button"
-                  onClick={loadSavedQuizzes}
-                  disabled={isLoadingSavedQuizzes}
+                  onClick={loadSelectedQuizQuestions}
+                  disabled={!selectedSavedQuizId || isLoadingQuizQuestions}
                 >
-                  {isLoadingSavedQuizzes ? 'Loading...' : 'Load Saved Quiz Questions'}
+                  {isLoadingQuizQuestions ? 'Loading Questions...' : 'Load Questions'}
                 </button>
-              ) : (
-                <div className="load-quiz-row">
-                  <select
-                    value={selectedSavedQuizId}
-                    onChange={(event) => setSelectedSavedQuizId(event.target.value)}
-                    disabled={savedQuizzes.length === 0}
-                    aria-label="Saved quizzes"
-                  >
-                    {savedQuizzes.length === 0 ? (
-                      <option value="">No saved quizzes found</option>
-                    ) : (
-                      savedQuizzes.map((quiz) => (
-                        <option key={quiz.id} value={quiz.id}>
-                          {quiz.course_name} - {quiz.quiz_title}
-                          {quiz.is_active ? '' : ' (Draft)'}
-                        </option>
-                      ))
-                    )}
-                  </select>
 
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={loadSelectedQuizQuestions}
-                    disabled={!selectedSavedQuizId || isLoadingQuizQuestions}
-                  >
-                    {isLoadingQuizQuestions ? 'Loading Questions...' : 'Load Questions'}
-                  </button>
-
-                  <button
-                    type="button"
-                    className="secondary-button clear-loaded-quiz-button"
-                    onClick={clearLoadedQuizQuestions}
-                  >
-                    Clear Loaded Questions
-                  </button>
-                </div>
-              )}
+                <button
+                  type="button"
+                  className="secondary-button clear-loaded-quiz-button"
+                  onClick={clearLoadedQuizQuestions}
+                >
+                  Clear Loaded Questions
+                </button>
+              </div>
               </section>
             )}
 
@@ -1691,6 +1734,16 @@ export default function CreateQuiz() {
                 <div>
                   <dt>Time Limit</dt>
                   <dd>{formatDuration(createdQuiz.quiz_duration_minutes || 30)}</dd>
+                </div>
+                <div className={liveRemainingSeconds === 0 ? 'is-expired' : ''}>
+                  <dt>Countdown</dt>
+                  <dd>
+                    {createdQuiz.is_active === false
+                      ? 'Ended'
+                      : liveRemainingSeconds === null
+                        ? 'Calculating...'
+                        : formatRemainingTime(liveRemainingSeconds)}
+                  </dd>
                 </div>
               </dl>
             </section>

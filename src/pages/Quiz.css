@@ -902,9 +902,13 @@
 .live-session-detail-grid,
 .live-results-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin: 0;
+}
+
+.live-session-detail-grid,
+.live-results-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .live-session-detail-grid div,
@@ -934,8 +938,8 @@
   font-weight: 900;
 }
 
-.live-results-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+.live-session-detail-grid .is-expired dd {
+  color: #b91c1c;
 }
 
 .live-results-grid strong {
@@ -1057,8 +1061,21 @@
 }
 
 .quiz-result-details {
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  padding: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px 24px;
+  padding: 20px;
+}
+
+.quiz-result-details div {
+  grid-template-columns: 120px minmax(0, 1fr);
+}
+
+.quiz-result-details dd {
+  overflow-wrap: anywhere;
+}
+
+.quiz-result-details .quiz-detail-wide {
+  grid-column: 1 / -1;
 }
 
 .quiz-countdown {
@@ -1098,6 +1115,89 @@
 
 .quiz-student-card h2 {
   margin-top: 0;
+}
+
+.student-result-review {
+  display: grid;
+  gap: 14px;
+  margin-top: 22px;
+}
+
+.student-result-review h3 {
+  margin: 0;
+  color: #111827;
+}
+
+.student-result-question-list {
+  display: grid;
+  gap: 12px;
+}
+
+.student-result-question {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.student-result-question.is-missed {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.student-result-question.is-correct {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.student-result-question-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.student-result-question-header strong {
+  color: #111827;
+  overflow-wrap: anywhere;
+}
+
+.student-result-question-header span {
+  color: #334155;
+  font-weight: 900;
+}
+
+.student-result-question.is-missed .student-result-question-header span {
+  color: #b91c1c;
+}
+
+.student-result-question.is-correct .student-result-question-header span {
+  color: #15803d;
+}
+
+.student-result-question dl {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.student-result-question dl div {
+  display: grid;
+  gap: 4px;
+}
+
+.student-result-question dt {
+  color: #52616f;
+  font-weight: 800;
+}
+
+.student-result-question dd {
+  margin: 0;
+  color: #111827;
+  overflow-wrap: anywhere;
 }
 
 .student-question-card {
@@ -1398,6 +1498,7 @@ select {
     .copy-row,
     .qr-code-box,
     .quiz-dropdown-search,
+    .quiz-result-details,
     .results-stat-grid,
     .missed-question-row {
     grid-template-columns: 1fr;

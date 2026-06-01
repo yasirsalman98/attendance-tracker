@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import {
-  downloadQuizResultsCsv,
   formatDateTime,
   getQuizResultSummary,
 } from '../quizResultsUtils';
@@ -15,6 +14,28 @@ function formatDate(value) {
   if (Number.isNaN(date.getTime())) return value;
 
   return date.toLocaleDateString();
+}
+
+function formatDuration(value) {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 'Not provided';
+
+  return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
+}
+
+function formatQuestionCount(quiz) {
+  const questionCount = quiz?.quiz_questions?.length || 0;
+  return `${questionCount} ${questionCount === 1 ? 'question' : 'questions'}`;
+}
+
+function formatQuizStatus(quiz) {
+  if (quiz.results_saved) return 'Saved Results';
+  if (quiz.finalizing) return 'Finalizing';
+  if (quiz.force_submit) return 'Ending';
+  if (quiz.is_active) return 'Active';
+  if (quiz.is_saved_template) return 'Saved Template';
+
+  return 'Inactive';
 }
 
 function formatQuizLabel(quiz) {
@@ -56,6 +77,11 @@ export default function QuizResults() {
   const resultSummary = getQuizResultSummary(selectedQuiz, attempts);
   const mostMissedQuestions = resultSummary.mostMissedQuestions;
   const quizIdFromUrl = searchParams.get('quizId') || '';
+  const showBackToQuizLink =
+    selectedQuiz?.is_active &&
+    !selectedQuiz.results_saved &&
+    !selectedQuiz.force_submit &&
+    !selectedQuiz.finalizing;
   const filteredQuizzes = useMemo(() => {
     const searchTerm = appliedQuizSearchTerm.trim().toLowerCase();
 
@@ -214,10 +240,21 @@ export default function QuizResults() {
     setIsDeletingQuiz(true);
     setStatus('');
 
+    let userId;
+
+    try {
+      userId = await getCurrentUserId();
+    } catch (error) {
+      setStatus(error?.message || 'Please sign in again.');
+      setIsDeletingQuiz(false);
+      return;
+    }
+
     const { error } = await supabase
       .from('quiz_templates')
       .delete()
-      .eq('id', quizToDelete.id);
+      .eq('id', quizToDelete.id)
+      .eq('owner_user_id', userId);
 
     if (error) {
       console.error('Delete quiz error:', error);
@@ -269,13 +306,12 @@ export default function QuizResults() {
       <div className="quiz-card quiz-results-card">
         <div className="admin-header">
           <div>
-            <p className="eyebrow">Instructor Results</p>
             <h2>Quiz Results</h2>
             <p className="muted">Review student attempts and class performance.</p>
           </div>
 
           <div className="admin-actions">
-            {selectedQuizId && (
+            {showBackToQuizLink && (
               <Link
                 to={`/create-quiz-7392?quizId=${selectedQuizId}`}
                 className="secondary-link-button"
@@ -394,12 +430,40 @@ export default function QuizResults() {
                     <dd>{selectedQuiz.quiz_title}</dd>
                   </div>
                   <div>
+                    <dt>Instructor</dt>
+                    <dd>{selectedQuiz.instructor_name || 'Not provided'}</dd>
+                  </div>
+                  <div>
                     <dt>Class Date</dt>
                     <dd>{formatDate(selectedQuiz.class_date)}</dd>
                   </div>
                   <div>
                     <dt>Passing Score</dt>
                     <dd>{selectedQuiz.passing_score}%</dd>
+                  </div>
+                  <div>
+                    <dt>Duration</dt>
+                    <dd>{formatDuration(selectedQuiz.quiz_duration_minutes)}</dd>
+                  </div>
+                  <div>
+                    <dt>Questions</dt>
+                    <dd>{formatQuestionCount(selectedQuiz)}</dd>
+                  </div>
+                  <div>
+                    <dt>Status</dt>
+                    <dd>{formatQuizStatus(selectedQuiz)}</dd>
+                  </div>
+                  <div>
+                    <dt>Created</dt>
+                    <dd>{formatDateTime(selectedQuiz.created_at)}</dd>
+                  </div>
+                  <div>
+                    <dt>Last Updated</dt>
+                    <dd>{formatDateTime(selectedQuiz.updated_at)}</dd>
+                  </div>
+                  <div className="quiz-detail-wide">
+                    <dt>Description</dt>
+                    <dd>{selectedQuiz.quiz_description || 'Not provided'}</dd>
                   </div>
                 </dl>
 
@@ -423,36 +487,6 @@ export default function QuizResults() {
                 </div>
 
                 <section className="results-section">
-                  <div className="quiz-section-header">
-                    <h3>Most Missed Questions</h3>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      onClick={() => downloadQuizResultsCsv(selectedQuiz, attempts)}
-                      disabled={attempts.length === 0}
-                    >
-                      Download CSV
-                    </button>
-                  </div>
-
-                  {mostMissedQuestions.length === 0 ? (
-                    <p className="muted">No questions found for this quiz.</p>
-                  ) : (
-                    <div className="missed-question-list">
-                      {mostMissedQuestions.map((question) => (
-                        <div className="missed-question-row" key={question.id}>
-                          <span>{question.questionText}</span>
-                          <strong>
-                            {question.missedCount} missed (
-                            {question.missPercentage.toFixed(2)}%)
-                          </strong>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-
-                <section className="results-section">
                   <h3>Class Question Insights</h3>
 
                   {attempts.length === 0 ? (
@@ -470,7 +504,6 @@ export default function QuizResults() {
                             <th>Correct</th>
                             <th>Missed</th>
                             <th>Miss Percentage</th>
-                            <th>Class Note</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -483,11 +516,6 @@ export default function QuizResults() {
                               </td>
                               <td>{question.missedCount} of {attempts.length}</td>
                               <td>{question.missPercentage.toFixed(2)}%</td>
-                              <td>
-                                {question.missedCount === 0
-                                  ? 'No misses'
-                                  : 'Review this topic'}
-                              </td>
                             </tr>
                           ))}
                         </tbody>

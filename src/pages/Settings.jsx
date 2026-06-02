@@ -2,28 +2,6 @@ import { useEffect, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import './Quiz.css';
 
-function fileToTemplateUpload(file) {
-  return new Promise((resolve, reject) => {
-    if (!file) {
-      resolve(null);
-      return;
-    }
-
-    const reader = new FileReader();
-
-    reader.onload = () => {
-      const result = String(reader.result || '');
-      resolve({
-        base64: result.includes(',') ? result.split(',').pop() : result,
-        fileName: file.name,
-        mimeType: file.type || 'application/octet-stream',
-      });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
 function formatDateTime(value) {
   if (!value) return 'Never';
 
@@ -61,36 +39,6 @@ async function readFunctionResponse(response, fallbackMessage) {
   return data;
 }
 
-function UploadPreview({ file }) {
-  const [previewUrl, setPreviewUrl] = useState('');
-
-  useEffect(() => {
-    if (!file || !file.type.startsWith('image/')) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setPreviewUrl('');
-      return undefined;
-    }
-
-    const nextPreviewUrl = URL.createObjectURL(file);
-    setPreviewUrl(nextPreviewUrl);
-
-    return () => URL.revokeObjectURL(nextPreviewUrl);
-  }, [file]);
-
-  if (!file) return null;
-
-  if (!previewUrl) {
-    return <span className="settings-file-note">{file.name}</span>;
-  }
-
-  return (
-    <div className="settings-upload-preview">
-      <img src={previewUrl} alt={`${file.name} preview`} />
-      <span>{file.name}</span>
-    </div>
-  );
-}
-
 export default function Settings() {
   const [users, setUsers] = useState([]);
   const [newEmail, setNewEmail] = useState('');
@@ -109,11 +57,7 @@ export default function Settings() {
     walletFront: 'same',
     walletBack: 'same',
     certificateTemplate: 'same',
-  });
-  const [templateFiles, setTemplateFiles] = useState({
-    certificateTemplate: null,
-    walletFront: null,
-    walletBack: null,
+    certificateDesign: 'excourse',
   });
   const [currentUserId, setCurrentUserId] = useState('');
   const [status, setStatus] = useState('Loading emails...');
@@ -205,11 +149,7 @@ export default function Settings() {
       walletFront: 'same',
       walletBack: 'same',
       certificateTemplate: 'same',
-    });
-    setTemplateFiles({
-      certificateTemplate: null,
-      walletFront: null,
-      walletBack: null,
+      certificateDesign: 'excourse',
     });
   }
 
@@ -221,51 +161,16 @@ export default function Settings() {
     setStatus('');
 
     try {
-      if (
-        importOptions.certificateTemplate &&
-        templateDesigns.certificateTemplate === 'different' &&
-        !templateFiles.certificateTemplate
-      ) {
-        throw new Error('Upload a certificate template or choose same design.');
-      }
-
-      if (
-        importOptions.walletCards &&
-        templateDesigns.walletFront === 'different' &&
-        !templateFiles.walletFront
-      ) {
-        throw new Error('Upload a front wallet card design or choose same design.');
-      }
-
-      if (
-        importOptions.walletCards &&
-        templateDesigns.walletBack === 'different' &&
-        !templateFiles.walletBack
-      ) {
-        throw new Error('Upload a back wallet card design or choose same design.');
-      }
-
+      const nextTemplateDesigns = {
+        ...templateDesigns,
+        walletCards: 'same',
+        walletFront: 'same',
+        walletBack: 'same',
+        certificateTemplate: 'same',
+      };
       const templateUploads = {
-        certificateTemplate:
-          importOptions.certificateTemplate &&
-          templateDesigns.certificateTemplate === 'different'
-            ? await fileToTemplateUpload(templateFiles.certificateTemplate)
-            : null,
-        walletCards:
-          importOptions.walletCards &&
-          (templateDesigns.walletFront === 'different' ||
-            templateDesigns.walletBack === 'different')
-            ? {
-                front:
-                  templateDesigns.walletFront === 'different'
-                    ? await fileToTemplateUpload(templateFiles.walletFront)
-                    : null,
-                back:
-                  templateDesigns.walletBack === 'different'
-                    ? await fileToTemplateUpload(templateFiles.walletBack)
-                    : null,
-              }
-            : null,
+        certificateTemplate: null,
+        walletCards: null,
       };
       const accessToken = await getAccessToken();
       const response = await fetch('/.netlify/functions/instructor-users', {
@@ -278,7 +183,7 @@ export default function Settings() {
           email: pendingAddUser.email,
           password: pendingAddUser.password,
           importOptions,
-          templateDesigns,
+          templateDesigns: nextTemplateDesigns,
           templateUploads,
         }),
       });
@@ -287,11 +192,6 @@ export default function Settings() {
       setNewEmail('');
       setNewPassword('');
       setPendingAddUser(null);
-      setTemplateFiles({
-        certificateTemplate: null,
-        walletFront: null,
-        walletBack: null,
-      });
       setUsers(data?.users || []);
       setStatus(
         data?.importedQuizCount || data?.importedSavedResultCount
@@ -508,21 +408,6 @@ export default function Settings() {
     setTemplateDesigns((currentDesigns) => ({
       ...currentDesigns,
       [templateName]: design,
-    }));
-  }
-
-  function updateWalletTemplateDesign(design) {
-    setTemplateDesigns((currentDesigns) => ({
-      ...currentDesigns,
-      walletFront: design,
-      walletBack: design,
-    }));
-  }
-
-  function updateTemplateFile(templateName, file) {
-    setTemplateFiles((currentFiles) => ({
-      ...currentFiles,
-      [templateName]: file || null,
     }));
   }
 
@@ -1002,65 +887,6 @@ export default function Settings() {
                         <option value="bowman">Bowman Steel wallet cards</option>
                       </select>
                     </label>
-                    <label>
-                      <input
-                        type="radio"
-                        name="walletCardDesign"
-                        value="same"
-                        checked={
-                          templateDesigns.walletFront === 'same' &&
-                          templateDesigns.walletBack === 'same'
-                        }
-                        onChange={() => updateWalletTemplateDesign('same')}
-                      />
-                      Use same wallet card design
-                    </label>
-                    <label>
-                      <input
-                        type="radio"
-                        name="walletCardDesign"
-                        value="different"
-                        checked={
-                          templateDesigns.walletFront === 'different' ||
-                          templateDesigns.walletBack === 'different'
-                        }
-                        onChange={() => updateWalletTemplateDesign('different')}
-                      />
-                      Use different wallet card design
-                    </label>
-                    {(templateDesigns.walletFront === 'different' ||
-                      templateDesigns.walletBack === 'different') && (
-                      <div className="settings-upload-grid">
-                        <label>
-                          Wallet card front design
-                          <input
-                            type="file"
-                            accept="image/*,.pdf,application/pdf"
-                            onChange={(event) =>
-                              updateTemplateFile(
-                                'walletFront',
-                                event.target.files?.[0]
-                              )
-                            }
-                          />
-                          <UploadPreview file={templateFiles.walletFront} />
-                        </label>
-                        <label>
-                          Wallet card back design
-                          <input
-                            type="file"
-                            accept="image/*,.pdf,application/pdf"
-                            onChange={(event) =>
-                              updateTemplateFile(
-                                'walletBack',
-                                event.target.files?.[0]
-                              )
-                            }
-                          />
-                          <UploadPreview file={templateFiles.walletBack} />
-                        </label>
-                      </div>
-                    )}
                   </div>
                 )}
                 <label>
@@ -1078,50 +904,20 @@ export default function Settings() {
                 </label>
                 {importOptions.certificateTemplate && (
                   <div className="settings-design-options">
-                    <label>
-                      <input
-                        type="radio"
-                        name="certificateTemplateDesign"
-                        value="same"
-                        checked={templateDesigns.certificateTemplate === 'same'}
-                        onChange={() =>
-                          updateTemplateDesign('certificateTemplate', 'same')
-                        }
-                      />
-                      Import same design
-                    </label>
-                    <label>
-                      <input
-                        type="radio"
-                        name="certificateTemplateDesign"
-                        value="different"
-                        checked={templateDesigns.certificateTemplate === 'different'}
-                        onChange={() =>
+                    <label className="settings-design-select">
+                      Certificate design
+                      <select
+                        value={templateDesigns.certificateDesign}
+                        onChange={(event) =>
                           updateTemplateDesign(
-                            'certificateTemplate',
-                            'different'
+                            'certificateDesign',
+                            event.target.value
                           )
                         }
-                      />
-                      Import different design
+                      >
+                        <option value="excourse">ExCourse certificate</option>
+                      </select>
                     </label>
-                    {templateDesigns.certificateTemplate === 'different' && (
-                      <div className="settings-upload-grid">
-                        <label>
-                          Upload template
-                          <input
-                            type="file"
-                            accept=".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"
-                            onChange={(event) =>
-                              updateTemplateFile(
-                                'certificateTemplate',
-                                event.target.files?.[0]
-                              )
-                            }
-                          />
-                        </label>
-                      </div>
-                    )}
                   </div>
                 )}
                 <label>
@@ -1132,7 +928,7 @@ export default function Settings() {
                       updateImportOption('quizzes', event.target.checked)
                     }
                   />
-                  Quizzes
+                  Saved quiz library
                 </label>
                 <label>
                   <input

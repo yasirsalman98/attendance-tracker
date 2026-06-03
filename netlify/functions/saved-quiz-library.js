@@ -51,6 +51,45 @@ function hasSavedQuizLibrary(user) {
   return Boolean(user?.user_metadata?.imported_assets?.quizzes);
 }
 
+function getFallbackSavedQuizLibraryCompany(user) {
+  const importedAssets = user?.user_metadata?.imported_assets || {};
+  const templateDesigns = user?.user_metadata?.template_designs || {};
+  const walletDesign = String(
+    templateDesigns.walletCardDesign || templateDesigns.walletCards || ''
+  ).toLowerCase();
+  const certificateDesign = String(
+    templateDesigns.certificateDesign || ''
+  ).toLowerCase();
+
+  if (walletDesign === 'bowman' || certificateDesign === 'bowman') {
+    return 'bowman';
+  }
+
+  if (
+    importedAssets.quizzes ||
+    importedAssets.savedQuizResults ||
+    importedAssets.walletCards ||
+    importedAssets.certificateTemplate
+  ) {
+    return 'excourse';
+  }
+
+  return '';
+}
+
+function getSavedQuizLibraryCompany(user) {
+  if (legacyQuizOwnerEmails.includes(normalizeEmail(user?.email))) {
+    return 'excourse';
+  }
+
+  return String(
+    user?.user_metadata?.template_designs?.savedQuizLibraryCompany ||
+      user?.user_metadata?.template_designs?.attendanceRecordsCompany ||
+      user?.user_metadata?.template_designs?.savedQuizResultsCompany ||
+      getFallbackSavedQuizLibraryCompany(user)
+  ).trim().toLowerCase();
+}
+
 function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -103,11 +142,82 @@ async function getUserEmailMap(adminClient) {
   );
 }
 
+async function getSharedSavedQuizOwnerIds(adminClient, user) {
+  if (isSettingsAdmin(user)) return null;
+  if (!hasSavedQuizLibrary(user)) return [];
+
+  const company = getSavedQuizLibraryCompany(user);
+
+  if (!company) return [user.id];
+
+  const authUsers = await listAuthUsers(adminClient);
+  const ownerIds = authUsers
+    .filter((authUser) => getSavedQuizLibraryCompany(authUser) === company)
+    .map((authUser) => authUser.id);
+
+  return ownerIds.length ? ownerIds : [user.id];
+}
+
 function withOwnerEmail(quiz, userEmailById) {
   return {
     ...quiz,
     owner_email: userEmailById.get(quiz.owner_user_id) || '',
   };
+}
+
+function getSavedQuizContentKey(quiz) {
+  const questions = [...(quiz.quiz_questions || [])]
+    .sort((left, right) => (left.sort_order || 0) - (right.sort_order || 0))
+    .map((question) => ({
+      text: question.question_text || '',
+      type: question.question_type || '',
+      choices: [...(question.quiz_answer_choices || [])]
+        .sort((left, right) => (left.sort_order || 0) - (right.sort_order || 0))
+        .map((choice) => ({
+          text: choice.choice_text || '',
+          correct: Boolean(choice.is_correct),
+        })),
+    }));
+
+  return JSON.stringify({
+    courseName: quiz.course_name || '',
+    quizTitle: quiz.quiz_title || '',
+    passingScore: Number(quiz.passing_score || 0),
+    duration: Number(quiz.quiz_duration_minutes || 0),
+    questions,
+  });
+}
+
+function dedupeSavedQuizzes(quizzes, user) {
+  const savedQuizByContent = new Map();
+
+  for (const quiz of quizzes || []) {
+    const contentKey = getSavedQuizContentKey(quiz);
+    const existingQuiz = savedQuizByContent.get(contentKey);
+
+    if (!existingQuiz) {
+      savedQuizByContent.set(contentKey, quiz);
+      continue;
+    }
+
+    const quizIsAdminOwned = legacyQuizOwnerEmails.includes(
+      normalizeEmail(quiz.owner_email)
+    );
+    const existingIsAdminOwned = legacyQuizOwnerEmails.includes(
+      normalizeEmail(existingQuiz.owner_email)
+    );
+    const quizIsCurrentUsers = quiz.owner_user_id === user.id;
+    const existingIsCurrentUsers = existingQuiz.owner_user_id === user.id;
+
+    if (
+      (quizIsAdminOwned && !existingIsAdminOwned) ||
+      (!existingIsAdminOwned && quizIsCurrentUsers && !existingIsCurrentUsers)
+    ) {
+      savedQuizByContent.set(contentKey, quiz);
+    }
+  }
+
+  return [...savedQuizByContent.values()];
 }
 
 async function getSavedLibraryQuizKeys(adminClient, sourceUserId) {
@@ -317,13 +427,62 @@ async function copyQuizzesFromUsers(adminClient, sourceUsers, targetUserId) {
 }
 
 async function listSavedQuizzes(adminClient, user) {
+  const sharedOwnerIds = await getSharedSavedQuizOwnerIds(adminClient, user);
+
+  if (Array.isArray(sharedOwnerIds) && sharedOwnerIds.length === 0) {
+    return [];
+  }
+
   const selectSavedQuizzes = (useSavedTemplateFlag) => {
     let query = adminClient
       .from('quiz_templates')
       .select(
         useSavedTemplateFlag
-          ? 'id, course_name, quiz_title, class_date, is_active, results_saved, is_saved_template, quiz_duration_minutes, created_at, owner_user_id'
-          : 'id, course_name, quiz_title, class_date, is_active, results_saved, quiz_duration_minutes, created_at, owner_user_id'
+          ? `
+            id,
+            course_name,
+            quiz_title,
+            class_date,
+            passing_score,
+            is_active,
+            results_saved,
+            is_saved_template,
+            quiz_duration_minutes,
+            created_at,
+            owner_user_id,
+            quiz_questions (
+              question_text,
+              question_type,
+              sort_order,
+              quiz_answer_choices (
+                choice_text,
+                is_correct,
+                sort_order
+              )
+            )
+          `
+          : `
+            id,
+            course_name,
+            quiz_title,
+            class_date,
+            passing_score,
+            is_active,
+            results_saved,
+            quiz_duration_minutes,
+            created_at,
+            owner_user_id,
+            quiz_questions (
+              question_text,
+              question_type,
+              sort_order,
+              quiz_answer_choices (
+                choice_text,
+                is_correct,
+                sort_order
+              )
+            )
+          `
       )
       .order('created_at', { ascending: false });
 
@@ -331,8 +490,8 @@ async function listSavedQuizzes(adminClient, user) {
       ? query.eq('is_saved_template', true)
       : query.eq('is_active', false).eq('results_saved', false);
 
-    if (!isSettingsAdmin(user)) {
-      query = query.eq('owner_user_id', user.id);
+    if (Array.isArray(sharedOwnerIds)) {
+      query = query.in('owner_user_id', sharedOwnerIds);
     }
 
     return query;
@@ -348,16 +507,21 @@ async function listSavedQuizzes(adminClient, user) {
 
   if (error) throw error;
 
-  if (!isSettingsAdmin(user)) {
-    return data || [];
-  }
-
   const userEmailById = await getUserEmailMap(adminClient);
+  const quizzesWithOwnerEmail = (data || []).map((quiz) =>
+    withOwnerEmail(quiz, userEmailById)
+  );
 
-  return (data || []).map((quiz) => withOwnerEmail(quiz, userEmailById));
+  return dedupeSavedQuizzes(quizzesWithOwnerEmail, user);
 }
 
 async function getSavedQuizDetails(adminClient, user, quizId) {
+  const sharedOwnerIds = await getSharedSavedQuizOwnerIds(adminClient, user);
+
+  if (Array.isArray(sharedOwnerIds) && sharedOwnerIds.length === 0) {
+    return null;
+  }
+
   const selectSavedQuizDetails = (useSavedTemplateFlag) => {
     let query = adminClient
       .from('quiz_templates')
@@ -382,8 +546,8 @@ async function getSavedQuizDetails(adminClient, user, quizId) {
       ? query.eq('is_saved_template', true)
       : query.eq('is_active', false).eq('results_saved', false);
 
-    if (!isSettingsAdmin(user)) {
-      query = query.eq('owner_user_id', user.id);
+    if (Array.isArray(sharedOwnerIds)) {
+      query = query.in('owner_user_id', sharedOwnerIds);
     }
 
     return query;
@@ -459,33 +623,11 @@ export async function handler(event) {
       });
     }
 
-    const sourceUsers = await getUsersByEmails(adminClient, legacyQuizOwnerEmails);
-
-    if (sourceUsers.length === 0) {
-      return jsonResponse(404, { error: 'Saved quiz library owner was not found.' });
-    }
-
-    if (!hasSavedQuizLibrary(userData.user)) {
-      await removeSavedLibraryCopiesFromUsers(
-        adminClient,
-        sourceUsers,
-        userData.user.id
-      );
-
-      return jsonResponse(200, {
-        importedQuizCount: 0,
-        removedSavedLibrary: true,
-        skipped: true,
-      });
-    }
-
-    const importedQuizCount = await copyQuizzesFromUsers(
-      adminClient,
-      sourceUsers,
-      userData.user.id
-    );
-
-    return jsonResponse(200, { importedQuizCount });
+    return jsonResponse(200, {
+      importedQuizCount: 0,
+      sharedLibrary: true,
+      skipped: true,
+    });
   } catch (error) {
     console.error('Saved quiz library sync error:', error);
     return jsonResponse(500, {

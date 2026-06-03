@@ -19,6 +19,7 @@ import QuizResults from './pages/QuizResults';
 import Settings from './pages/Settings';
 import StudentQuiz from './pages/StudentQuiz';
 import { supabase } from './supabaseClient';
+import { isSettingsAdminUser } from './userFeatureAccess';
 import './App.css';
 
 const protectedPaths = [
@@ -31,10 +32,8 @@ const protectedPaths = [
   '/settings-7392',
 ];
 
-const settingsAdminEmail = 'excourse7233@gmail.com';
-
 function isSettingsAdmin(session) {
-  return session?.user?.email?.toLowerCase() === settingsAdminEmail;
+  return isSettingsAdminUser(session?.user);
 }
 
 function LoadingPage() {

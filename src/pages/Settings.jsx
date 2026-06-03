@@ -39,14 +39,34 @@ async function readFunctionResponse(response, fallbackMessage) {
   return data;
 }
 
+function getDefaultAttendanceCompany(companies) {
+  return companies[0] || '';
+}
+
+function formatImportedCounts(data) {
+  const importedParts = [];
+
+  if (data?.importedQuizCount) {
+    importedParts.push(`${data.importedQuizCount} saved quizzes`);
+  }
+
+  if (data?.importedSavedResultCount) {
+    importedParts.push(`${data.importedSavedResultCount} saved quiz results`);
+  }
+
+  return importedParts.length ? `${importedParts.join(' and ')} imported.` : '';
+}
+
 export default function Settings() {
   const [users, setUsers] = useState([]);
+  const [attendanceCompanies, setAttendanceCompanies] = useState([]);
   const [newEmail, setNewEmail] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [pendingAddUser, setPendingAddUser] = useState(null);
   const [importOptions, setImportOptions] = useState({
     none: true,
+    attendanceRecords: false,
     walletCards: false,
     certificateTemplate: false,
     quizzes: false,
@@ -58,6 +78,9 @@ export default function Settings() {
     walletBack: 'same',
     certificateTemplate: 'same',
     certificateDesign: 'excourse',
+    attendanceRecordsCompany: '',
+    savedQuizLibraryCompany: '',
+    savedQuizResultsCompany: '',
   });
   const [currentUserId, setCurrentUserId] = useState('');
   const [status, setStatus] = useState('Loading emails...');
@@ -73,6 +96,7 @@ export default function Settings() {
   const [deleteTargetUser, setDeleteTargetUser] = useState(null);
   const [featureTargetUser, setFeatureTargetUser] = useState(null);
   const [featureOptions, setFeatureOptions] = useState({
+    attendanceRecords: false,
     walletCards: false,
     certificateTemplate: false,
     quizzes: false,
@@ -84,6 +108,9 @@ export default function Settings() {
     walletBack: 'same',
     certificateTemplate: 'same',
     certificateDesign: 'excourse',
+    attendanceRecordsCompany: '',
+    savedQuizLibraryCompany: '',
+    savedQuizResultsCompany: '',
   });
   const [isUpdatingFeatures, setIsUpdatingFeatures] = useState(false);
 
@@ -112,6 +139,7 @@ export default function Settings() {
       const data = await readFunctionResponse(response, 'Unable to load emails.');
 
       setUsers(data?.users || []);
+      setAttendanceCompanies(data?.attendanceCompanies || []);
       setStatus(data?.users?.length ? '' : 'No emails found.');
     } catch (error) {
       console.error('Load instructor users error:', error);
@@ -139,6 +167,7 @@ export default function Settings() {
     setPendingAddUser({ email: cleanEmail, password: newPassword });
     setImportOptions({
       none: true,
+      attendanceRecords: false,
       walletCards: false,
       certificateTemplate: false,
       quizzes: false,
@@ -150,6 +179,9 @@ export default function Settings() {
       walletBack: 'same',
       certificateTemplate: 'same',
       certificateDesign: 'excourse',
+      attendanceRecordsCompany: getDefaultAttendanceCompany(attendanceCompanies),
+      savedQuizLibraryCompany: getDefaultAttendanceCompany(attendanceCompanies),
+      savedQuizResultsCompany: getDefaultAttendanceCompany(attendanceCompanies),
     });
   }
 
@@ -168,6 +200,22 @@ export default function Settings() {
         walletBack: 'same',
         certificateTemplate: 'same',
       };
+
+      if (importOptions.attendanceRecords && !nextTemplateDesigns.attendanceRecordsCompany) {
+        throw new Error('Choose an attendance records company.');
+      }
+
+      if (importOptions.quizzes && !nextTemplateDesigns.savedQuizLibraryCompany) {
+        throw new Error('Choose a saved quiz library company.');
+      }
+
+      if (
+        importOptions.savedQuizResults &&
+        !nextTemplateDesigns.savedQuizResultsCompany
+      ) {
+        throw new Error('Choose a saved quiz results company.');
+      }
+
       const templateUploads = {
         certificateTemplate: null,
         walletCards: null,
@@ -193,11 +241,11 @@ export default function Settings() {
       setNewPassword('');
       setPendingAddUser(null);
       setUsers(data?.users || []);
+      setAttendanceCompanies(data?.attendanceCompanies || attendanceCompanies);
+      const importedMessage = formatImportedCounts(data);
       setStatus(
-        data?.importedQuizCount || data?.importedSavedResultCount
-          ? `Email added. ${data.importedQuizCount || 0} saved quizzes and ${
-              data.importedSavedResultCount || 0
-            } saved quiz results imported.`
+        importedMessage
+          ? `Email added. ${importedMessage}`
           : 'Email added. The user can now log in with the password you set.'
       );
     } catch (error) {
@@ -247,6 +295,7 @@ export default function Settings() {
       const data = await readFunctionResponse(response, 'Unable to reset password.');
 
       setUsers(data?.users || []);
+      setAttendanceCompanies(data?.attendanceCompanies || attendanceCompanies);
       setResetPasswordValue('');
       setResetTargetUser(null);
       setStatus('Password reset.');
@@ -262,6 +311,7 @@ export default function Settings() {
   function openFeatureSettings(user) {
     setFeatureTargetUser(user);
     setFeatureOptions({
+      attendanceRecords: Boolean(user.imported_assets?.attendanceRecords),
       walletCards: Boolean(user.imported_assets?.walletCards),
       certificateTemplate: Boolean(user.imported_assets?.certificateTemplate),
       quizzes: Boolean(user.imported_assets?.quizzes),
@@ -279,6 +329,17 @@ export default function Settings() {
         'same',
       certificateTemplate: user.template_designs?.certificateTemplate || 'same',
       certificateDesign: user.template_designs?.certificateDesign || 'excourse',
+      attendanceRecordsCompany:
+        user.template_designs?.attendanceRecordsCompany ||
+        getDefaultAttendanceCompany(attendanceCompanies),
+      savedQuizLibraryCompany:
+        user.template_designs?.savedQuizLibraryCompany ||
+        user.template_designs?.attendanceRecordsCompany ||
+        getDefaultAttendanceCompany(attendanceCompanies),
+      savedQuizResultsCompany:
+        user.template_designs?.savedQuizResultsCompany ||
+        user.template_designs?.attendanceRecordsCompany ||
+        getDefaultAttendanceCompany(attendanceCompanies),
     });
     setErrorMessage('');
     setStatus('');
@@ -292,6 +353,12 @@ export default function Settings() {
           : optionName === 'walletCards'
             ? checked
             : currentOptions.walletCards,
+      attendanceRecords:
+        optionName === 'none'
+          ? false
+          : optionName === 'attendanceRecords'
+            ? checked
+            : currentOptions.attendanceRecords,
       certificateTemplate:
         optionName === 'none'
           ? false
@@ -335,6 +402,28 @@ export default function Settings() {
         walletBack: 'same',
         certificateTemplate: 'same',
       };
+
+      if (
+        featureOptions.attendanceRecords &&
+        !nextFeatureTemplateDesigns.attendanceRecordsCompany
+      ) {
+        throw new Error('Choose an attendance records company.');
+      }
+
+      if (
+        featureOptions.quizzes &&
+        !nextFeatureTemplateDesigns.savedQuizLibraryCompany
+      ) {
+        throw new Error('Choose a saved quiz library company.');
+      }
+
+      if (
+        featureOptions.savedQuizResults &&
+        !nextFeatureTemplateDesigns.savedQuizResultsCompany
+      ) {
+        throw new Error('Choose a saved quiz results company.');
+      }
+
       const templateUploads = {
         certificateTemplate: null,
         walletCards: null,
@@ -357,12 +446,12 @@ export default function Settings() {
       const data = await readFunctionResponse(response, 'Unable to update features.');
 
       setUsers(data?.users || []);
+      setAttendanceCompanies(data?.attendanceCompanies || attendanceCompanies);
       setFeatureTargetUser(null);
+      const importedMessage = formatImportedCounts(data);
       setStatus(
-        data?.importedQuizCount || data?.importedSavedResultCount
-          ? `Features updated. ${data.importedQuizCount || 0} saved quizzes and ${
-              data.importedSavedResultCount || 0
-            } saved quiz results imported.`
+        importedMessage
+          ? `Features updated. ${importedMessage}`
           : 'Features updated.'
       );
     } catch (error) {
@@ -389,6 +478,12 @@ export default function Settings() {
           : optionName === 'certificateTemplate'
             ? checked
             : currentOptions.certificateTemplate,
+      attendanceRecords:
+        optionName === 'none'
+          ? false
+          : optionName === 'attendanceRecords'
+            ? checked
+            : currentOptions.attendanceRecords,
       quizzes:
         optionName === 'none'
           ? false
@@ -431,6 +526,7 @@ export default function Settings() {
       const data = await readFunctionResponse(response, 'Unable to delete email.');
 
       setUsers(data?.users || []);
+      setAttendanceCompanies(data?.attendanceCompanies || attendanceCompanies);
       setDeleteTargetUser(null);
       setStatus('Email and all owned ExCourse data deleted.');
     } catch (error) {
@@ -595,12 +691,19 @@ export default function Settings() {
         </div>
 
         {deleteTargetUser && (
-          <div className="quiz-confirm-overlay" role="presentation">
+          <div
+            className="quiz-confirm-overlay"
+            role="presentation"
+            onClick={() => {
+              if (!deletingUserId) setDeleteTargetUser(null);
+            }}
+          >
             <div
               className="quiz-confirm-popup"
               role="dialog"
               aria-modal="true"
               aria-labelledby="deleteEmailTitle"
+              onClick={(event) => event.stopPropagation()}
             >
               <h3 id="deleteEmailTitle">Delete Email?</h3>
               <p>
@@ -630,12 +733,19 @@ export default function Settings() {
         )}
 
         {resetTargetUser && (
-          <div className="quiz-confirm-overlay" role="presentation">
+          <div
+            className="quiz-confirm-overlay"
+            role="presentation"
+            onClick={() => {
+              if (!isResettingPassword) setResetTargetUser(null);
+            }}
+          >
             <div
               className="quiz-confirm-popup"
               role="dialog"
               aria-modal="true"
               aria-labelledby="resetPasswordTitle"
+              onClick={(event) => event.stopPropagation()}
             >
               <h3 id="resetPasswordTitle">Reset Password</h3>
               <p>Enter a new password for {resetTargetUser.email}.</p>
@@ -705,12 +815,19 @@ export default function Settings() {
         )}
 
         {featureTargetUser && (
-          <div className="quiz-confirm-overlay" role="presentation">
+          <div
+            className="quiz-confirm-overlay"
+            role="presentation"
+            onClick={() => {
+              if (!isUpdatingFeatures) setFeatureTargetUser(null);
+            }}
+          >
             <div
               className="quiz-confirm-popup"
               role="dialog"
               aria-modal="true"
               aria-labelledby="manageFeaturesTitle"
+              onClick={(event) => event.stopPropagation()}
             >
               <h3 id="manageFeaturesTitle">Manage Features</h3>
               <p>
@@ -724,6 +841,7 @@ export default function Settings() {
                     type="checkbox"
                     checked={
                       !featureOptions.walletCards &&
+                      !featureOptions.attendanceRecords &&
                       !featureOptions.certificateTemplate &&
                       !featureOptions.quizzes &&
                       !featureOptions.savedQuizResults
@@ -734,6 +852,42 @@ export default function Settings() {
                   />
                   None
                 </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={featureOptions.attendanceRecords}
+                    onChange={(event) =>
+                      updateFeatureOption('attendanceRecords', event.target.checked)
+                    }
+                  />
+                  Attendance records
+                </label>
+                {featureOptions.attendanceRecords && (
+                  <div className="settings-design-options">
+                    <label className="settings-design-select">
+                      Attendance records company
+                      <select
+                        value={featureTemplateDesigns.attendanceRecordsCompany}
+                        onChange={(event) =>
+                          updateFeatureTemplateDesign(
+                            'attendanceRecordsCompany',
+                            event.target.value
+                          )
+                        }
+                      >
+                        {attendanceCompanies.length === 0 ? (
+                          <option value="">No companies found</option>
+                        ) : (
+                          attendanceCompanies.map((company) => (
+                            <option key={company} value={company}>
+                              {company}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                  </div>
+                )}
                 <label>
                   <input
                     type="checkbox"
@@ -804,6 +958,32 @@ export default function Settings() {
                   />
                   Saved quiz library
                 </label>
+                {featureOptions.quizzes && (
+                  <div className="settings-design-options">
+                    <label className="settings-design-select">
+                      Saved quiz library company
+                      <select
+                        value={featureTemplateDesigns.savedQuizLibraryCompany}
+                        onChange={(event) =>
+                          updateFeatureTemplateDesign(
+                            'savedQuizLibraryCompany',
+                            event.target.value
+                          )
+                        }
+                      >
+                        {attendanceCompanies.length === 0 ? (
+                          <option value="">No companies found</option>
+                        ) : (
+                          attendanceCompanies.map((company) => (
+                            <option key={company} value={company}>
+                              {company}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                  </div>
+                )}
                 <label>
                   <input
                     type="checkbox"
@@ -814,6 +994,32 @@ export default function Settings() {
                   />
                   Saved quiz results
                 </label>
+                {featureOptions.savedQuizResults && (
+                  <div className="settings-design-options">
+                    <label className="settings-design-select">
+                      Saved quiz results company
+                      <select
+                        value={featureTemplateDesigns.savedQuizResultsCompany}
+                        onChange={(event) =>
+                          updateFeatureTemplateDesign(
+                            'savedQuizResultsCompany',
+                            event.target.value
+                          )
+                        }
+                      >
+                        {attendanceCompanies.length === 0 ? (
+                          <option value="">No companies found</option>
+                        ) : (
+                          attendanceCompanies.map((company) => (
+                            <option key={company} value={company}>
+                              {company}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                  </div>
+                )}
               </div>
 
               <div className="quiz-confirm-actions">
@@ -839,12 +1045,19 @@ export default function Settings() {
         )}
 
         {pendingAddUser && (
-          <div className="quiz-confirm-overlay" role="presentation">
+          <div
+            className="quiz-confirm-overlay"
+            role="presentation"
+            onClick={() => {
+              if (!isAdding) setPendingAddUser(null);
+            }}
+          >
             <div
               className="quiz-confirm-popup"
               role="dialog"
               aria-modal="true"
               aria-labelledby="addEmailOptionsTitle"
+              onClick={(event) => event.stopPropagation()}
             >
               <h3 id="addEmailOptionsTitle">Include Information?</h3>
               <p>Choose what should be imported for {pendingAddUser.email}.</p>
@@ -860,6 +1073,42 @@ export default function Settings() {
                   />
                   None
                 </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={importOptions.attendanceRecords}
+                    onChange={(event) =>
+                      updateImportOption('attendanceRecords', event.target.checked)
+                    }
+                  />
+                  Attendance records
+                </label>
+                {importOptions.attendanceRecords && (
+                  <div className="settings-design-options">
+                    <label className="settings-design-select">
+                      Attendance records company
+                      <select
+                        value={templateDesigns.attendanceRecordsCompany}
+                        onChange={(event) =>
+                          updateTemplateDesign(
+                            'attendanceRecordsCompany',
+                            event.target.value
+                          )
+                        }
+                      >
+                        {attendanceCompanies.length === 0 ? (
+                          <option value="">No companies found</option>
+                        ) : (
+                          attendanceCompanies.map((company) => (
+                            <option key={company} value={company}>
+                              {company}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                  </div>
+                )}
                 <label>
                   <input
                     type="checkbox"
@@ -930,6 +1179,32 @@ export default function Settings() {
                   />
                   Saved quiz library
                 </label>
+                {importOptions.quizzes && (
+                  <div className="settings-design-options">
+                    <label className="settings-design-select">
+                      Saved quiz library company
+                      <select
+                        value={templateDesigns.savedQuizLibraryCompany}
+                        onChange={(event) =>
+                          updateTemplateDesign(
+                            'savedQuizLibraryCompany',
+                            event.target.value
+                          )
+                        }
+                      >
+                        {attendanceCompanies.length === 0 ? (
+                          <option value="">No companies found</option>
+                        ) : (
+                          attendanceCompanies.map((company) => (
+                            <option key={company} value={company}>
+                              {company}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                  </div>
+                )}
                 <label>
                   <input
                     type="checkbox"
@@ -940,6 +1215,32 @@ export default function Settings() {
                   />
                   Saved quiz results
                 </label>
+                {importOptions.savedQuizResults && (
+                  <div className="settings-design-options">
+                    <label className="settings-design-select">
+                      Saved quiz results company
+                      <select
+                        value={templateDesigns.savedQuizResultsCompany}
+                        onChange={(event) =>
+                          updateTemplateDesign(
+                            'savedQuizResultsCompany',
+                            event.target.value
+                          )
+                        }
+                      >
+                        {attendanceCompanies.length === 0 ? (
+                          <option value="">No companies found</option>
+                        ) : (
+                          attendanceCompanies.map((company) => (
+                            <option key={company} value={company}>
+                              {company}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                  </div>
+                )}
               </div>
 
               <div className="quiz-confirm-actions">

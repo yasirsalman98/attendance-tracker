@@ -6,6 +6,10 @@ import { supabase } from '../supabaseClient';
 
 const SHAREPOINT_ARCHIVE_EMAIL = 'excourse7233@gmail.com';
 
+function normalizeCompany(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function getAssetAccessFromUser(user) {
   const importedAssets = user?.user_metadata?.imported_assets;
 
@@ -20,6 +24,65 @@ function getAssetAccessFromUser(user) {
     certificateTemplate: Boolean(importedAssets.certificateTemplate),
     walletCards: Boolean(importedAssets.walletCards),
   };
+}
+
+function getAttendanceRecordsCompanyFromUser(user) {
+  const metadata = user?.user_metadata || {};
+
+  if (!metadata.imported_assets?.attendanceRecords) {
+    return '';
+  }
+
+  return String(metadata.template_designs?.attendanceRecordsCompany || '').trim();
+}
+
+function filterRecordsByAttendanceAccess(records, user) {
+  const userEmail = user?.email?.trim().toLowerCase() || '';
+  const attendanceRecordsCompany = getAttendanceRecordsCompanyFromUser(user);
+
+  if (userEmail === SHAREPOINT_ARCHIVE_EMAIL) {
+    return records;
+  }
+
+  if (attendanceRecordsCompany) {
+    const normalizedCompany = normalizeCompany(attendanceRecordsCompany);
+
+    return records.filter(
+      (record) =>
+        normalizeCompany(record.training_sessions?.company_name) ===
+        normalizedCompany
+    );
+  }
+
+  return records.filter(
+    (record) => record.training_sessions?.owner_user_id === user?.id
+  );
+}
+
+function filterSessionsByAttendanceAccess(sessions, user) {
+  const userEmail = user?.email?.trim().toLowerCase() || '';
+  const attendanceRecordsCompany = getAttendanceRecordsCompanyFromUser(user);
+
+  if (userEmail === SHAREPOINT_ARCHIVE_EMAIL) {
+    return sessions;
+  }
+
+  if (attendanceRecordsCompany) {
+    const normalizedCompany = normalizeCompany(attendanceRecordsCompany);
+
+    return sessions.filter(
+      (session) => normalizeCompany(session.company_name) === normalizedCompany
+    );
+  }
+
+  return sessions.filter((session) => session.owner_user_id === user?.id);
+}
+
+function canManageAttendanceRecordsFromUser(user) {
+  return (
+    user?.email?.trim().toLowerCase() === SHAREPOINT_ARCHIVE_EMAIL ||
+    Boolean(getAttendanceRecordsCompanyFromUser(user))
+  );
 }
 
 function formatDateTime(value) {
@@ -220,9 +283,19 @@ async function getAccessToken() {
   return data.session.access_token;
 }
 
-function groupRecordsBySession(records) {
+function groupRecordsBySession(records, sessions = []) {
   const groupsById = new Map();
   const unassignedRecords = [];
+
+  sessions.forEach((session) => {
+    if (!session?.id || groupsById.has(session.id)) return;
+
+    groupsById.set(session.id, {
+      id: session.id,
+      session,
+      records: [],
+    });
+  });
 
   records.forEach((record) => {
     const session = record.training_sessions;
@@ -468,7 +541,11 @@ function TrainerSignaturePreview({ session, onError }) {
 
 export default function AdminRecords() {
   const [records, setRecords] = useState([]);
+  const [sessions, setSessions] = useState([]);
   const [currentUserEmail, setCurrentUserEmail] = useState('');
+  const [currentUserId, setCurrentUserId] = useState('');
+  const [canManageAttendanceRecords, setCanManageAttendanceRecords] =
+    useState(false);
   const [assetAccess, setAssetAccess] = useState({
     certificateTemplate: true,
     walletCards: true,
@@ -485,7 +562,10 @@ export default function AdminRecords() {
   const [photoModalError, setPhotoModalError] = useState('');
   const [expandedSessionIds, setExpandedSessionIds] = useState(() => new Set());
 
-  const groupedRecords = useMemo(() => groupRecordsBySession(records), [records]);
+  const groupedRecords = useMemo(
+    () => groupRecordsBySession(records, sessions),
+    [records, sessions]
+  );
   const shouldArchiveToSharePoint =
     currentUserEmail.trim().toLowerCase() === SHAREPOINT_ARCHIVE_EMAIL;
   const handleMediaLoadError = useCallback((message) => {
@@ -521,10 +601,11 @@ export default function AdminRecords() {
     });
   }
 
-  function showLoadedRecords(nextRecords) {
+  function showLoadedRecords(nextRecords, nextSessions = []) {
     setRecords(nextRecords);
+    setSessions(nextSessions);
     setExpandedSessionIds(
-      new Set(groupRecordsBySession(nextRecords).map((group) => group.id))
+      new Set(groupRecordsBySession(nextRecords, nextSessions).map((group) => group.id))
     );
   }
 
@@ -561,10 +642,13 @@ export default function AdminRecords() {
 
     const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
     const accessToken = sessionData?.session?.access_token;
-    const userEmail = sessionData?.session?.user?.email || '';
+    const user = sessionData?.session?.user;
+    const userEmail = user?.email || '';
 
     setCurrentUserEmail(userEmail.trim().toLowerCase());
-    setAssetAccess(getAssetAccessFromUser(sessionData?.session?.user));
+    setCurrentUserId(user?.id || '');
+    setCanManageAttendanceRecords(canManageAttendanceRecordsFromUser(user));
+    setAssetAccess(getAssetAccessFromUser(user));
 
     if (sessionError || !accessToken) {
       console.error('Attendance records auth error:', sessionError);
@@ -585,7 +669,8 @@ export default function AdminRecords() {
         const data = await response.json().catch(() => null);
 
         if (Array.isArray(data?.records)) {
-          showLoadedRecords(data.records);
+          setCanManageAttendanceRecords(Boolean(data.canManageAttendanceRecords));
+          showLoadedRecords(data.records, data.sessions || []);
           setStatus('');
           return;
         }
@@ -620,7 +705,24 @@ export default function AdminRecords() {
       return;
     }
 
-    const loadedRecords = result.data || [];
+    const loadedRecords = filterRecordsByAttendanceAccess(result.data || [], user);
+
+    const allSessionsResult = await supabase
+      .from('training_sessions')
+      .select('*')
+      .order('training_date', { ascending: false })
+      .order('created_at', { ascending: false });
+
+    if (allSessionsResult.error) {
+      console.error(allSessionsResult.error);
+      setStatus(allSessionsResult.error.message);
+      return;
+    }
+
+    const loadedSessions = filterSessionsByAttendanceAccess(
+      allSessionsResult.data || [],
+      user
+    );
 
     const sessionIds = getUniqueSessionIds(loadedRecords);
     const recordsMissingSessions = loadedRecords.some(
@@ -635,17 +737,20 @@ export default function AdminRecords() {
 
       if (sessionsResult.error) {
         console.error(sessionsResult.error);
-        showLoadedRecords(loadedRecords);
+        showLoadedRecords(loadedRecords, loadedSessions);
         setStatus(sessionsResult.error.message);
         return;
       }
 
-      showLoadedRecords(mergeRecordSessions(loadedRecords, sessionsResult.data || []));
+      showLoadedRecords(
+        mergeRecordSessions(loadedRecords, sessionsResult.data || []),
+        loadedSessions
+      );
       setStatus('');
       return;
     }
 
-    showLoadedRecords(loadedRecords);
+    showLoadedRecords(loadedRecords, loadedSessions);
     setStatus('');
   }
 
@@ -1366,9 +1471,6 @@ export default function AdminRecords() {
                       <th>Email</th>
                       <th>Company</th>
                       <th>Signed Date/Time</th>
-                      <th>Latitude</th>
-                      <th>Longitude</th>
-                      <th>Accuracy</th>
                       <th>Signature</th>
                       <th>Photo</th>
                       <th>Action</th>
@@ -1376,6 +1478,14 @@ export default function AdminRecords() {
                   </thead>
 
                   <tbody>
+                    {group.records.length === 0 && (
+                      <tr>
+                        <td colSpan="7" className="muted">
+                          No students found for this class.
+                        </td>
+                      </tr>
+                    )}
+
                     {group.records.map((record) => (
                       <tr key={record.id}>
                         <td>
@@ -1403,9 +1513,6 @@ export default function AdminRecords() {
                         <td>{record.student_email}</td>
                         <td>{record.company || 'N/A'}</td>
                         <td>{formatDateTime(record.signed_at)}</td>
-                        <td>{record.latitude}</td>
-                        <td>{record.longitude}</td>
-                        <td>{formatAccuracy(record.location_accuracy)}</td>
                         <td>
                           <SignaturePreview
                             record={record}
@@ -1420,14 +1527,20 @@ export default function AdminRecords() {
                           />
                         </td>
                         <td>
-                          <button
-                            type="button"
-                            className="delete-button"
-                            onClick={() => deleteRecord(record)}
-                            disabled={deletingId === record.id}
-                          >
-                            {deletingId === record.id ? 'Deleting...' : 'Delete'}
-                          </button>
+                          {canManageAttendanceRecords ||
+                          shouldArchiveToSharePoint ||
+                          record.training_sessions?.owner_user_id === currentUserId ? (
+                            <button
+                              type="button"
+                              className="delete-button"
+                              onClick={() => deleteRecord(record)}
+                              disabled={deletingId === record.id}
+                            >
+                              {deletingId === record.id ? 'Deleting...' : 'Delete'}
+                            </button>
+                          ) : (
+                            'N/A'
+                          )}
                         </td>
                       </tr>
                     ))}

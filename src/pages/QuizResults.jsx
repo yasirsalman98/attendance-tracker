@@ -5,6 +5,7 @@ import {
   formatDateTime,
   getQuizResultSummary,
 } from '../quizResultsUtils';
+import { canDeleteSavedQuizResults } from '../userFeatureAccess';
 import './Quiz.css';
 
 function formatDate(value) {
@@ -45,14 +46,20 @@ function formatQuizLabel(quiz) {
   return `${quiz.course_name || 'Untitled Course'} - ${quiz.quiz_title || 'Untitled Quiz'}${statusLabel}`;
 }
 
-async function getCurrentUserId() {
+async function getCurrentUser() {
   const { data, error } = await supabase.auth.getUser();
 
   if (error || !data?.user?.id) {
     throw new Error('Please sign in again.');
   }
 
-  return data.user.id;
+  return data.user;
+}
+
+async function getCurrentUserId() {
+  const user = await getCurrentUser();
+
+  return user.id;
 }
 
 export default function QuizResults() {
@@ -68,6 +75,7 @@ export default function QuizResults() {
   const [attempts, setAttempts] = useState([]);
   const [status, setStatus] = useState('Loading quizzes...');
   const [isLoading, setIsLoading] = useState(false);
+  const [canDeleteSavedResults, setCanDeleteSavedResults] = useState(true);
 
   const selectedQuiz = useMemo(
     () => quizzes.find((quiz) => quiz.id === selectedQuizId) || null,
@@ -100,7 +108,9 @@ export default function QuizResults() {
     let userId;
 
     try {
-      userId = await getCurrentUserId();
+      const user = await getCurrentUser();
+      userId = user.id;
+      setCanDeleteSavedResults(canDeleteSavedQuizResults(user));
     } catch (error) {
       setQuizzes([]);
       setSelectedQuizId('');
@@ -304,13 +314,19 @@ export default function QuizResults() {
   return (
     <section className="quiz-page">
       <div className="quiz-card quiz-results-card">
-        <div className="admin-header">
-          <div>
+        <div className="quiz-results-header">
+          <div className="quiz-results-left-actions">
+            <Link to="/quizzes-7392" className="secondary-link-button">
+              Back to Quizzes
+            </Link>
+          </div>
+
+          <div className="quiz-results-title">
             <h2>Quiz Results</h2>
             <p className="muted">Review student attempts and class performance.</p>
           </div>
 
-          <div className="admin-actions">
+          <div className="admin-actions quiz-results-right-actions">
             {showBackToQuizLink && (
               <Link
                 to={`/create-quiz-7392?quizId=${selectedQuizId}`}
@@ -383,30 +399,32 @@ export default function QuizResults() {
                         >
                           {formatQuizLabel(quiz)}
                         </button>
-                        <button
-                          type="button"
-                          className="quiz-delete-icon-button"
-                          aria-label={`Delete ${formatQuizLabel(quiz)}`}
-                          onClick={(event) => openDeleteQuizPopup(event, quiz)}
-                        >
-                          <svg
-                            aria-hidden="true"
-                            viewBox="0 0 24 24"
-                            width="18"
-                            height="18"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
+                        {canDeleteSavedResults && (
+                          <button
+                            type="button"
+                            className="quiz-delete-icon-button"
+                            aria-label={`Delete ${formatQuizLabel(quiz)}`}
+                            onClick={(event) => openDeleteQuizPopup(event, quiz)}
                           >
-                            <path d="M3 6h18" />
-                            <path d="M8 6V4h8v2" />
-                            <path d="M19 6l-1 14H6L5 6" />
-                            <path d="M10 11v5" />
-                            <path d="M14 11v5" />
-                          </svg>
-                        </button>
+                            <svg
+                              aria-hidden="true"
+                              viewBox="0 0 24 24"
+                              width="18"
+                              height="18"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              <path d="M3 6h18" />
+                              <path d="M8 6V4h8v2" />
+                              <path d="M19 6l-1 14H6L5 6" />
+                              <path d="M10 11v5" />
+                              <path d="M14 11v5" />
+                            </svg>
+                          </button>
+                        )}
                       </div>
                     ))}
 

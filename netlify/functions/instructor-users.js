@@ -53,6 +53,10 @@ function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
 
+function normalizeCompany(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function normalizePassword(password) {
   return String(password || '');
 }
@@ -63,6 +67,7 @@ function isMissingSavedTemplateColumn(error) {
 
 function normalizeImportOptions(importOptions) {
   return {
+    attendanceRecords: Boolean(importOptions?.attendanceRecords),
     walletCards: Boolean(importOptions?.walletCards),
     certificateTemplate: Boolean(importOptions?.certificateTemplate),
     quizzes: Boolean(importOptions?.quizzes),
@@ -90,6 +95,19 @@ function normalizeTemplateDesigns(templateDesigns) {
     certificateTemplate:
       templateDesigns?.certificateTemplate === 'different' ? 'different' : 'same',
     certificateDesign: templateDesigns?.certificateDesign || 'excourse',
+    attendanceRecordsCompany: String(
+      templateDesigns?.attendanceRecordsCompany || ''
+    ).trim(),
+    savedQuizLibraryCompany: String(
+      templateDesigns?.savedQuizLibraryCompany ||
+        templateDesigns?.attendanceRecordsCompany ||
+        ''
+    ).trim(),
+    savedQuizResultsCompany: String(
+      templateDesigns?.savedQuizResultsCompany ||
+        templateDesigns?.attendanceRecordsCompany ||
+        ''
+    ).trim(),
   };
 }
 
@@ -153,6 +171,10 @@ async function listUsers(adminClient) {
     .sort((left, right) => left.email.localeCompare(right.email));
 }
 
+async function listAttendanceCompanies() {
+  return ['Excourse', 'Bowman'];
+}
+
 async function listAuthUsers(adminClient) {
   const { data, error } = await adminClient.auth.admin.listUsers({
     page: 1,
@@ -171,6 +193,36 @@ async function getUsersByEmails(adminClient, emails) {
   return authUsers.filter((user) =>
     wantedEmails.has(normalizeEmail(user.email))
   );
+}
+
+function getUserFeatureCompany(user, key) {
+  const userEmail = normalizeEmail(user?.email);
+  const templateDesigns = user?.user_metadata?.template_designs || {};
+  const company =
+    templateDesigns[key] ||
+    templateDesigns.attendanceRecordsCompany ||
+    (legacyQuizOwnerEmails.includes(userEmail) ? 'Excourse' : '');
+
+  return normalizeCompany(company);
+}
+
+async function getUsersByFeatureCompany(adminClient, key, company) {
+  const normalizedCompany = normalizeCompany(company);
+
+  if (!normalizedCompany) {
+    return getUsersByEmails(adminClient, legacyQuizOwnerEmails);
+  }
+
+  const authUsers = await listAuthUsers(adminClient);
+  const matchedUsers = authUsers.filter(
+    (user) => getUserFeatureCompany(user, key) === normalizedCompany
+  );
+
+  return matchedUsers.length
+    ? matchedUsers
+    : normalizedCompany === 'excourse'
+      ? getUsersByEmails(adminClient, legacyQuizOwnerEmails)
+      : [];
 }
 
 function getUniqueValues(values) {
@@ -883,7 +935,10 @@ export async function handler(event) {
 
   try {
     if (event.httpMethod === 'GET') {
-      return jsonResponse(200, { users: await listUsers(adminClient) });
+      return jsonResponse(200, {
+        users: await listUsers(adminClient),
+        attendanceCompanies: await listAttendanceCompanies(),
+      });
     }
 
     if (event.httpMethod === 'POST') {
@@ -952,23 +1007,11 @@ export async function handler(event) {
           if (metadataError) throw metadataError;
         }
 
-        if (importOptions.quizzes && createdUser?.id) {
-          const sourceUsers = await getUsersByEmails(
-            adminClient,
-            legacyQuizOwnerEmails
-          );
-
-          importedQuizCount = await copyQuizzesFromUsers(
-            adminClient,
-            sourceUsers,
-            createdUser.id
-          );
-        }
-
         if (importOptions.savedQuizResults && createdUser?.id) {
-          const sourceUsers = await getUsersByEmails(
+          const sourceUsers = await getUsersByFeatureCompany(
             adminClient,
-            legacyQuizOwnerEmails
+            'savedQuizResultsCompany',
+            templateDesigns.savedQuizResultsCompany
           );
 
           importedSavedResultCount = await copySavedQuizResultsFromUsers(
@@ -992,6 +1035,7 @@ export async function handler(event) {
 
       return jsonResponse(200, {
         users: await listUsers(adminClient),
+        attendanceCompanies: await listAttendanceCompanies(),
         importedQuizCount,
         importedSavedResultCount,
       });
@@ -1063,26 +1107,11 @@ export async function handler(event) {
         let importedQuizCount = 0;
         let importedSavedResultCount = 0;
 
-        const sourceUsers = await getUsersByEmails(
+        const sourceUsers = await getUsersByFeatureCompany(
           adminClient,
-          legacyQuizOwnerEmails
+          'savedQuizResultsCompany',
+          nextTemplateDesigns.savedQuizResultsCompany
         );
-
-        if (nextAssets.quizzes) {
-          importedQuizCount = await copyQuizzesFromUsers(
-            adminClient,
-            sourceUsers,
-            existingUser.id
-          );
-        }
-
-        if (!nextAssets.quizzes) {
-          await removeSavedLibraryCopiesFromUsers(
-            adminClient,
-            sourceUsers,
-            existingUser.id
-          );
-        }
 
         if (nextAssets.savedQuizResults) {
           importedSavedResultCount = await copySavedQuizResultsFromUsers(
@@ -1102,6 +1131,7 @@ export async function handler(event) {
 
         return jsonResponse(200, {
           users: await listUsers(adminClient),
+          attendanceCompanies: await listAttendanceCompanies(),
           importedQuizCount,
           importedSavedResultCount,
         });
@@ -1120,7 +1150,10 @@ export async function handler(event) {
 
       if (error) throw error;
 
-      return jsonResponse(200, { users: await listUsers(adminClient) });
+      return jsonResponse(200, {
+        users: await listUsers(adminClient),
+        attendanceCompanies: await listAttendanceCompanies(),
+      });
     }
 
     if (event.httpMethod === 'DELETE') {
@@ -1141,7 +1174,10 @@ export async function handler(event) {
 
       if (error) throw error;
 
-      return jsonResponse(200, { users: await listUsers(adminClient) });
+      return jsonResponse(200, {
+        users: await listUsers(adminClient),
+        attendanceCompanies: await listAttendanceCompanies(),
+      });
     }
 
     return jsonResponse(405, { error: 'Method not allowed.' });

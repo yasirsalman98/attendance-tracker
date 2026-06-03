@@ -8,6 +8,27 @@ function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
 
+function normalizeCompany(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function getAttendanceRecordsCompany(user) {
+  const metadata = user?.user_metadata || {};
+
+  if (!metadata.imported_assets?.attendanceRecords) {
+    return '';
+  }
+
+  return String(metadata.template_designs?.attendanceRecordsCompany || '').trim();
+}
+
+function recordMatchesAttendanceCompany(record, normalizedCompany) {
+  return (
+    normalizedCompany &&
+    normalizeCompany(record?.training_sessions?.company_name) === normalizedCompany
+  );
+}
+
 function jsonResponse(statusCode, body) {
   return {
     statusCode,
@@ -101,6 +122,11 @@ export async function handler(event) {
   const canViewAllClasses = allClassViewerEmails.has(
     normalizeEmail(userData.user.email)
   );
+  const attendanceRecordsCompany = getAttendanceRecordsCompany(userData.user);
+  const normalizedAttendanceRecordsCompany = normalizeCompany(attendanceRecordsCompany);
+  const canManageAssignedAttendanceRecords = Boolean(
+    normalizedAttendanceRecordsCompany
+  );
 
   if (event.httpMethod === 'DELETE') {
     const body = JSON.parse(event.body || '{}');
@@ -126,8 +152,12 @@ export async function handler(event) {
     }
 
     const session = record.training_sessions;
+    const canManageThisRecord =
+      canViewAllClasses ||
+      session?.owner_user_id === userData.user.id ||
+      recordMatchesAttendanceCompany(record, normalizedAttendanceRecordsCompany);
 
-    if (!canViewAllClasses && session?.owner_user_id !== userData.user.id) {
+    if (!canManageThisRecord) {
       return jsonResponse(403, { error: 'You do not have access to delete this record.' });
     }
 
@@ -167,7 +197,17 @@ export async function handler(event) {
           .eq('id', record.training_session_id);
 
         if (!canViewAllClasses) {
-          deleteSessionQuery = deleteSessionQuery.eq('owner_user_id', userData.user.id);
+          if (
+            canManageAssignedAttendanceRecords &&
+            recordMatchesAttendanceCompany(record, normalizedAttendanceRecordsCompany)
+          ) {
+            deleteSessionQuery = deleteSessionQuery.eq(
+              'company_name',
+              session?.company_name || ''
+            );
+          } else {
+            deleteSessionQuery = deleteSessionQuery.eq('owner_user_id', userData.user.id);
+          }
         }
 
         const { error: deleteSessionError } = await deleteSessionQuery;
@@ -201,9 +241,53 @@ export async function handler(event) {
 
   const ownerRecords = canViewAllClasses
     ? data || []
-    : (data || []).filter(
-        (record) => record.training_sessions?.owner_user_id === userData.user.id
-      );
+    : (data || []).filter((record) => {
+        if (normalizedAttendanceRecordsCompany) {
+          return recordMatchesAttendanceCompany(
+            record,
+            normalizedAttendanceRecordsCompany
+          );
+        }
+
+        return record.training_sessions?.owner_user_id === userData.user.id;
+      });
+
+  const { data: sessionData, error: sessionError } = await adminClient
+    .from('training_sessions')
+    .select('*')
+    .order('training_date', { ascending: false })
+    .order('created_at', { ascending: false });
+
+  if (sessionError) {
+    console.error('Attendance sessions load error:', sessionError);
+    return jsonResponse(500, { error: sessionError.message || 'Unable to load classes.' });
+  }
+
+  const ownerSessions = canViewAllClasses
+    ? sessionData || []
+    : (sessionData || []).filter((session) => {
+        if (normalizedAttendanceRecordsCompany) {
+          return (
+            normalizeCompany(session.company_name) ===
+            normalizedAttendanceRecordsCompany
+          );
+        }
+
+        return session.owner_user_id === userData.user.id;
+      });
+
+  const sessions = await Promise.all(
+    ownerSessions.map(async (session) => ({
+      ...session,
+      trainer_signature_url:
+        session.trainer_signature_url ||
+        (await addSignedUrl(
+          adminClient,
+          'signatures',
+          session.trainer_signature_path
+        )),
+    }))
+  );
 
   const records = await Promise.all(
     ownerRecords.map(async (record) => {
@@ -238,8 +322,14 @@ export async function handler(event) {
 
   return jsonResponse(200, {
     records,
+    sessions,
     totalRecordCount: (data || []).length,
     ownedRecordCount: ownerRecords.length,
+    totalSessionCount: (sessionData || []).length,
+    ownedSessionCount: ownerSessions.length,
+    canManageAttendanceRecords:
+      canViewAllClasses || canManageAssignedAttendanceRecords,
+    attendanceRecordsCompany,
     email: userData.user.email || '',
   });
 }

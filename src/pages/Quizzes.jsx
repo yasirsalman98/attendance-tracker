@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { downloadQuizResultsExcel } from '../quizResultsExcel';
+import {
+  canDeleteSavedQuizResults,
+  canUseSavedQuizLibrary,
+  getSavedQuizDraftLabel,
+} from '../userFeatureAccess';
 import './Quiz.css';
 
 function formatDate(value) {
@@ -28,14 +33,20 @@ function formatDuration(minutes) {
     : hourLabel;
 }
 
-async function getCurrentUserId() {
+async function getCurrentUser() {
   const { data, error } = await supabase.auth.getUser();
 
   if (error || !data?.user?.id) {
     throw new Error('Please sign in again.');
   }
 
-  return data.user.id;
+  return data.user;
+}
+
+async function getCurrentUserId() {
+  const user = await getCurrentUser();
+
+  return user.id;
 }
 
 async function getCurrentAccessToken() {
@@ -119,7 +130,7 @@ async function fetchSavedQuizLibrary() {
 function getSavedQuizOptionLabel(quiz) {
   return `${quiz.course_name || 'Untitled Course'} - ${
     quiz.quiz_title || 'Untitled Quiz'
-  }${quiz.is_active ? '' : ' (Draft)'}`;
+  }${quiz.is_active ? '' : ` (${getSavedQuizDraftLabel(quiz)})`}`;
 }
 
 function isOriginalSavedQuizTemplate(quiz) {
@@ -137,6 +148,7 @@ function isMissingSavedTemplateColumn(error) {
 }
 
 export default function Quizzes() {
+  const navigate = useNavigate();
   const [allSavedQuizzes, setAllSavedQuizzes] = useState([]);
   const [savedQuizzes, setSavedQuizzes] = useState([]);
   const [selectedSavedQuizId, setSelectedSavedQuizId] = useState('');
@@ -149,12 +161,32 @@ export default function Quizzes() {
   const [deletingSavedResultQuizId, setDeletingSavedResultQuizId] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [userPermissions, setUserPermissions] = useState({
+    canUseSavedQuizLibrary: false,
+    canDeleteSavedQuizResults: true,
+  });
 
   const loadSavedQuizzes = useCallback(async function loadSavedQuizzes() {
     setIsLoadingSavedQuizzes(true);
     setErrorMessage('');
 
     try {
+      const user = await getCurrentUser();
+      const userCanUseSavedQuizLibrary = canUseSavedQuizLibrary(user);
+
+      setUserPermissions((currentPermissions) => ({
+        ...currentPermissions,
+        canUseSavedQuizLibrary: userCanUseSavedQuizLibrary,
+      }));
+
+      if (!userCanUseSavedQuizLibrary) {
+        setAllSavedQuizzes([]);
+        setSavedQuizzes([]);
+        setSelectedSavedQuizId('');
+        setSelectedCopiedQuizId('');
+        return;
+      }
+
       await syncSavedQuizLibrary();
       const libraryData = await fetchSavedQuizLibrary();
       const allQuizzes = libraryData.savedQuizzes || [];
@@ -187,7 +219,15 @@ export default function Quizzes() {
     setErrorMessage('');
 
     try {
-      const userId = await getCurrentUserId();
+      const user = await getCurrentUser();
+      const userId = user.id;
+      const userCanDeleteSavedQuizResults = canDeleteSavedQuizResults(user);
+
+      setUserPermissions((currentPermissions) => ({
+        ...currentPermissions,
+        canDeleteSavedQuizResults: userCanDeleteSavedQuizResults,
+      }));
+
       const { data, error } = await supabase
         .from('quiz_templates')
         .select('id, course_name, quiz_title, class_date, passing_score, quiz_duration_minutes, is_active, results_saved, created_at')
@@ -276,6 +316,11 @@ export default function Quizzes() {
     setStatusMessage('');
 
     try {
+      if (!userPermissions.canDeleteSavedQuizResults) {
+        setErrorMessage('This email cannot delete saved quiz results.');
+        return;
+      }
+
       const userId = await getCurrentUserId();
       const { error } = await supabase
         .from('quiz_templates')
@@ -295,6 +340,17 @@ export default function Quizzes() {
       setErrorMessage(error?.message || 'Unable to delete saved quiz result.');
     } finally {
       setDeletingSavedResultQuizId('');
+    }
+  }
+
+  function openSavedQuizResults(quiz) {
+    navigate(`/quiz-results-7392?quizId=${quiz.id}`);
+  }
+
+  function handleSavedResultRowKeyDown(event, quiz) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openSavedQuizResults(quiz);
     }
   }
 
@@ -413,6 +469,7 @@ export default function Quizzes() {
           </div>
         )}
 
+        {userPermissions.canUseSavedQuizLibrary && (
         <section className="active-quiz-panel saved-quizzes-panel">
           <div className="quiz-section-header">
             <div>
@@ -481,6 +538,7 @@ export default function Quizzes() {
             </div>
           )}
         </section>
+        )}
 
         <section className="active-quiz-panel saved-results-panel">
           <div className="quiz-section-header">
@@ -496,7 +554,14 @@ export default function Quizzes() {
           ) : (
             <div className="active-quiz-list">
               {savedResultQuizzes.map((quiz) => (
-                <div className="active-quiz-row saved-result-row" key={quiz.id}>
+                <div
+                  className="active-quiz-row saved-result-row"
+                  key={quiz.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => openSavedQuizResults(quiz)}
+                  onKeyDown={(event) => handleSavedResultRowKeyDown(event, quiz)}
+                >
                   <div>
                     <strong>
                       {quiz.course_name || 'Untitled Course'} -{' '}
@@ -512,47 +577,56 @@ export default function Quizzes() {
                     <Link
                       className="secondary-link-button compact-link-button"
                       to={`/quiz-results-7392?quizId=${quiz.id}`}
+                      onClick={(event) => event.stopPropagation()}
                     >
                       View Results
                     </Link>
                     <button
                       type="button"
                       className="secondary-button compact-link-button"
-                      onClick={() => downloadSavedQuizResults(quiz)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        downloadSavedQuizResults(quiz);
+                      }}
                       disabled={downloadingResultsQuizId === quiz.id}
                     >
                       {downloadingResultsQuizId === quiz.id
                         ? 'Downloading...'
                         : 'Download Results'}
                     </button>
-                    <button
-                      type="button"
-                      className="quiz-delete-icon-button"
-                      aria-label={`Delete saved result for ${
-                        quiz.course_name || 'Untitled Course'
-                      } - ${quiz.quiz_title || 'Untitled Quiz'}`}
-                      title="Delete saved result"
-                      onClick={() => deleteSavedQuizResult(quiz)}
-                      disabled={deletingSavedResultQuizId === quiz.id}
-                    >
-                      <svg
-                        aria-hidden="true"
-                        viewBox="0 0 24 24"
-                        width="18"
-                        height="18"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
+                    {userPermissions.canDeleteSavedQuizResults && (
+                      <button
+                        type="button"
+                        className="quiz-delete-icon-button"
+                        aria-label={`Delete saved result for ${
+                          quiz.course_name || 'Untitled Course'
+                        } - ${quiz.quiz_title || 'Untitled Quiz'}`}
+                        title="Delete saved result"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          deleteSavedQuizResult(quiz);
+                        }}
+                        disabled={deletingSavedResultQuizId === quiz.id}
                       >
-                        <path d="M3 6h18" />
-                        <path d="M8 6V4h8v2" />
-                        <path d="M19 6l-1 14H6L5 6" />
-                        <path d="M10 11v5" />
-                        <path d="M14 11v5" />
-                      </svg>
-                    </button>
+                        <svg
+                          aria-hidden="true"
+                          viewBox="0 0 24 24"
+                          width="18"
+                          height="18"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M3 6h18" />
+                          <path d="M8 6V4h8v2" />
+                          <path d="M19 6l-1 14H6L5 6" />
+                          <path d="M10 11v5" />
+                          <path d="M14 11v5" />
+                        </svg>
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}

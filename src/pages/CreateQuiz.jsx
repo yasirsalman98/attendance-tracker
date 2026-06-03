@@ -3,6 +3,11 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { QRCodeCanvas } from 'qrcode.react';
 import { supabase } from '../supabaseClient';
 import { getQuizResultSummary } from '../quizResultsUtils';
+import {
+  canLoadSavedQuizQuestions,
+  getSavedQuizDraftLabel,
+  isSettingsAdminUser,
+} from '../userFeatureAccess';
 import './Quiz.css';
 
 function getTodayDateValue() {
@@ -133,14 +138,20 @@ function isReusableSavedQuiz(quiz) {
   return quiz.is_active === false && !quiz.results_saved;
 }
 
-async function getCurrentUserId() {
+async function getCurrentUser() {
   const { data, error } = await supabase.auth.getUser();
 
   if (error || !data?.user?.id) {
     throw new Error('Please sign in again.');
   }
 
-  return data.user.id;
+  return data.user;
+}
+
+async function getCurrentUserId() {
+  const user = await getCurrentUser();
+
+  return user.id;
 }
 
 async function getCurrentAccessToken() {
@@ -258,6 +269,8 @@ export default function CreateQuiz() {
   const [liveRemainingSeconds, setLiveRemainingSeconds] = useState(null);
   const [savingResultsQuizId, setSavingResultsQuizId] = useState('');
   const [deletingSessionId, setDeletingSessionId] = useState('');
+  const [canLoadSavedQuizLibrary, setCanLoadSavedQuizLibrary] = useState(false);
+  const [isSettingsAdmin, setIsSettingsAdmin] = useState(false);
   const lastScrolledQuizIdRef = useRef('');
   const autoSaveExpiredQuizIdRef = useRef('');
   const saveQuizResultsRef = useRef(null);
@@ -688,6 +701,20 @@ export default function CreateQuiz() {
     setIsLoadingSavedQuizzes(true);
 
     try {
+      const user = await getCurrentUser();
+      const userCanLoadSavedQuizQuestions = canLoadSavedQuizQuestions(user);
+
+      setIsSettingsAdmin(isSettingsAdminUser(user));
+      setCanLoadSavedQuizLibrary(userCanLoadSavedQuizQuestions);
+
+      if (!userCanLoadSavedQuizQuestions) {
+        setSavedQuizzes([]);
+        setSelectedSavedQuizId('');
+        setStatusMessage('');
+        setIsLoadingSavedQuizzes(false);
+        return;
+      }
+
       await syncSavedQuizLibrary();
       const libraryData = await fetchSavedQuizLibrary();
       const quizzes = (libraryData.savedQuizzes || []).filter(isReusableSavedQuiz);
@@ -1412,7 +1439,7 @@ export default function CreateQuiz() {
 
         {!createdQuiz ? (
           <form className="quiz-form" onSubmit={handleSubmit}>
-            {!isEditingSavedQuiz && (
+            {!isEditingSavedQuiz && canLoadSavedQuizLibrary && (
               <section className="load-quiz-panel">
               <div>
                 <h2>Load Saved Quiz Questions</h2>
@@ -1433,7 +1460,7 @@ export default function CreateQuiz() {
                     savedQuizzes.map((quiz) => (
                       <option key={quiz.id} value={quiz.id}>
                         {quiz.course_name} - {quiz.quiz_title}
-                        {quiz.is_active ? '' : ' (Draft)'}
+                        {quiz.is_active ? '' : ` (${getSavedQuizDraftLabel(quiz)})`}
                       </option>
                     ))
                   )}
@@ -1683,7 +1710,13 @@ export default function CreateQuiz() {
                     onClick={() => saveQuiz({ publish: false })}
                     disabled={Boolean(savingAction)}
                   >
-                    {savingAction === 'draft' ? 'Saving Draft...' : 'Save as Draft'}
+                    {savingAction === 'draft'
+                      ? isSettingsAdmin
+                        ? 'Saving Draft...'
+                        : 'Saving Copy...'
+                      : isSettingsAdmin
+                        ? 'Save as Draft'
+                        : 'Save as Copy'}
                   </button>
 
                   <button

@@ -293,6 +293,11 @@ export async function handler(event) {
       sharedAttendanceOwnerIds
     )
   );
+  const visibleSessionIdsWithRecords = new Set(
+    ownerRecords
+      .map((record) => record.training_session_id)
+      .filter(Boolean)
+  );
 
   const { data: sessionData, error: sessionError } = await adminClient
     .from('training_sessions')
@@ -310,7 +315,7 @@ export async function handler(event) {
       session,
       userData.user,
       sharedAttendanceOwnerIds
-    )
+    ) && visibleSessionIdsWithRecords.has(session.id)
   );
 
   const sessions = await Promise.all(

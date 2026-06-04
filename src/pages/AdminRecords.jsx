@@ -747,6 +747,19 @@ export default function AdminRecords() {
         currentRecords.filter((currentRecord) => currentRecord.id !== record.id)
       );
 
+      if (data?.deletedSession && record.training_session_id) {
+        setSessions((currentSessions) =>
+          currentSessions.filter(
+            (currentSession) => currentSession.id !== record.training_session_id
+          )
+        );
+        setExpandedSessionIds((currentIds) => {
+          const nextIds = new Set(currentIds);
+          nextIds.delete(record.training_session_id);
+          return nextIds;
+        });
+      }
+
       setStatus(
         data?.deletedSession
           ? 'Last student deleted. The class and uploaded files were deleted too.'

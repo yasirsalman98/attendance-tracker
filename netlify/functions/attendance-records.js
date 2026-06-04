@@ -1,13 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
 
-const allClassViewerEmails = new Set([
-  'excourse7233@gmail.com',
-]);
-
-function normalizeEmail(email) {
-  return String(email || '').trim().toLowerCase();
-}
-
 function normalizeCompany(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -22,10 +14,46 @@ function getAttendanceRecordsCompany(user) {
   return String(metadata.template_designs?.attendanceRecordsCompany || '').trim();
 }
 
-function recordMatchesAttendanceCompany(record, normalizedCompany) {
+function getOwnerAttendanceRecordsCompany(user) {
+  return String(
+    user?.user_metadata?.template_designs?.attendanceRecordsCompany || ''
+  ).trim();
+}
+
+async function getSharedAttendanceOwnerIds(adminClient, normalizedCompany) {
+  if (!normalizedCompany) return new Set();
+
+  const { data, error } = await adminClient.auth.admin.listUsers({
+    page: 1,
+    perPage: 1000,
+  });
+
+  if (error) throw error;
+
+  return new Set(
+    (data?.users || [])
+      .filter(
+        (authUser) =>
+          normalizeCompany(getOwnerAttendanceRecordsCompany(authUser)) ===
+          normalizedCompany
+      )
+      .map((authUser) => authUser.id)
+  );
+}
+
+function sessionMatchesAttendanceAccess(session, user, sharedOwnerIds) {
+  if (!session?.owner_user_id || !user?.id) return false;
+
   return (
-    normalizedCompany &&
-    normalizeCompany(record?.training_sessions?.company_name) === normalizedCompany
+    session.owner_user_id === user.id || sharedOwnerIds.has(session.owner_user_id)
+  );
+}
+
+function recordMatchesAttendanceAccess(record, user, sharedOwnerIds) {
+  return sessionMatchesAttendanceAccess(
+    record?.training_sessions,
+    user,
+    sharedOwnerIds
   );
 }
 
@@ -119,11 +147,14 @@ export async function handler(event) {
     return jsonResponse(401, { error: 'Login required.' });
   }
 
-  const canViewAllClasses = allClassViewerEmails.has(
-    normalizeEmail(userData.user.email)
-  );
   const attendanceRecordsCompany = getAttendanceRecordsCompany(userData.user);
   const normalizedAttendanceRecordsCompany = normalizeCompany(attendanceRecordsCompany);
+  const sharedAttendanceOwnerIds = serviceRoleKey
+    ? await getSharedAttendanceOwnerIds(
+        adminClient,
+        normalizedAttendanceRecordsCompany
+      )
+    : new Set();
   const canManageAssignedAttendanceRecords = Boolean(
     normalizedAttendanceRecordsCompany
   );
@@ -152,17 +183,30 @@ export async function handler(event) {
     }
 
     const session = record.training_sessions;
-    const canManageThisRecord =
-      canViewAllClasses ||
-      session?.owner_user_id === userData.user.id ||
-      recordMatchesAttendanceCompany(record, normalizedAttendanceRecordsCompany);
+    const canManageThisRecord = recordMatchesAttendanceAccess(
+      record,
+      userData.user,
+      sharedAttendanceOwnerIds
+    );
 
     if (!canManageThisRecord) {
       return jsonResponse(403, { error: 'You do not have access to delete this record.' });
     }
 
-    await removeStorageFiles(adminClient, 'signatures', [record.signature_path]);
-    await removeStorageFiles(adminClient, 'attendance-photos', [record.photo_path]);
+    const { data: sessionRecordsBeforeDelete, error: sessionRecordsError } =
+      record.training_session_id
+        ? await adminClient
+            .from('attendance_records')
+            .select('id, signature_path, photo_path')
+            .eq('training_session_id', record.training_session_id)
+        : { data: [], error: null };
+
+    if (sessionRecordsError) {
+      console.error('Attendance session records lookup error:', sessionRecordsError);
+      return jsonResponse(500, {
+        error: sessionRecordsError.message || 'Unable to delete record.',
+      });
+    }
 
     const { error: deleteRecordError } = await adminClient
       .from('attendance_records')
@@ -176,6 +220,9 @@ export async function handler(event) {
       });
     }
 
+    await removeStorageFiles(adminClient, 'signatures', [record.signature_path]);
+    await removeStorageFiles(adminClient, 'attendance-photos', [record.photo_path]);
+
     let deletedSession = false;
 
     if (record.training_session_id) {
@@ -187,30 +234,30 @@ export async function handler(event) {
       if (countError) {
         console.error('Attendance record count error:', countError);
       } else if (count === 0) {
-        await removeStorageFiles(adminClient, 'signatures', [
-          session?.trainer_signature_path,
-        ]);
+        const deletedSessionRecords = sessionRecordsBeforeDelete || [];
 
-        let deleteSessionQuery = adminClient
+        await removeStorageFiles(
+          adminClient,
+          'signatures',
+          [
+            session?.trainer_signature_path,
+            ...deletedSessionRecords.map((nextRecord) => nextRecord.signature_path),
+          ]
+        );
+        await removeStorageFiles(
+          adminClient,
+          'attendance-photos',
+          deletedSessionRecords.map((nextRecord) => nextRecord.photo_path)
+        );
+
+        const deleteSessionQuery = adminClient
           .from('training_sessions')
           .delete()
-          .eq('id', record.training_session_id);
+          .eq('id', record.training_session_id)
+          .eq('owner_user_id', session?.owner_user_id || '');
 
-        if (!canViewAllClasses) {
-          if (
-            canManageAssignedAttendanceRecords &&
-            recordMatchesAttendanceCompany(record, normalizedAttendanceRecordsCompany)
-          ) {
-            deleteSessionQuery = deleteSessionQuery.eq(
-              'company_name',
-              session?.company_name || ''
-            );
-          } else {
-            deleteSessionQuery = deleteSessionQuery.eq('owner_user_id', userData.user.id);
-          }
-        }
-
-        const { error: deleteSessionError } = await deleteSessionQuery;
+        const { data: deletedSessions, error: deleteSessionError } =
+          await deleteSessionQuery.select('id');
 
         if (deleteSessionError) {
           console.error('Empty training session delete error:', deleteSessionError);
@@ -219,7 +266,7 @@ export async function handler(event) {
           });
         }
 
-        deletedSession = true;
+        deletedSession = (deletedSessions || []).length > 0;
       }
     }
 
@@ -239,18 +286,13 @@ export async function handler(event) {
     return jsonResponse(500, { error: error.message || 'Unable to load records.' });
   }
 
-  const ownerRecords = canViewAllClasses
-    ? data || []
-    : (data || []).filter((record) => {
-        if (normalizedAttendanceRecordsCompany) {
-          return recordMatchesAttendanceCompany(
-            record,
-            normalizedAttendanceRecordsCompany
-          );
-        }
-
-        return record.training_sessions?.owner_user_id === userData.user.id;
-      });
+  const ownerRecords = (data || []).filter((record) =>
+    recordMatchesAttendanceAccess(
+      record,
+      userData.user,
+      sharedAttendanceOwnerIds
+    )
+  );
 
   const { data: sessionData, error: sessionError } = await adminClient
     .from('training_sessions')
@@ -263,18 +305,13 @@ export async function handler(event) {
     return jsonResponse(500, { error: sessionError.message || 'Unable to load classes.' });
   }
 
-  const ownerSessions = canViewAllClasses
-    ? sessionData || []
-    : (sessionData || []).filter((session) => {
-        if (normalizedAttendanceRecordsCompany) {
-          return (
-            normalizeCompany(session.company_name) ===
-            normalizedAttendanceRecordsCompany
-          );
-        }
-
-        return session.owner_user_id === userData.user.id;
-      });
+  const ownerSessions = (sessionData || []).filter((session) =>
+    sessionMatchesAttendanceAccess(
+      session,
+      userData.user,
+      sharedAttendanceOwnerIds
+    )
+  );
 
   const sessions = await Promise.all(
     ownerSessions.map(async (session) => ({
@@ -327,8 +364,7 @@ export async function handler(event) {
     ownedRecordCount: ownerRecords.length,
     totalSessionCount: (sessionData || []).length,
     ownedSessionCount: ownerSessions.length,
-    canManageAttendanceRecords:
-      canViewAllClasses || canManageAssignedAttendanceRecords,
+    canManageAttendanceRecords: canManageAssignedAttendanceRecords,
     attendanceRecordsCompany,
     email: userData.user.email || '',
   });

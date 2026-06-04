@@ -6,10 +6,6 @@ import { supabase } from '../supabaseClient';
 
 const SHAREPOINT_ARCHIVE_EMAIL = 'excourse7233@gmail.com';
 
-function normalizeCompany(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
 function getAssetAccessFromUser(user) {
   const importedAssets = user?.user_metadata?.imported_assets;
 
@@ -37,52 +33,17 @@ function getAttendanceRecordsCompanyFromUser(user) {
 }
 
 function filterRecordsByAttendanceAccess(records, user) {
-  const userEmail = user?.email?.trim().toLowerCase() || '';
-  const attendanceRecordsCompany = getAttendanceRecordsCompanyFromUser(user);
-
-  if (userEmail === SHAREPOINT_ARCHIVE_EMAIL) {
-    return records;
-  }
-
-  if (attendanceRecordsCompany) {
-    const normalizedCompany = normalizeCompany(attendanceRecordsCompany);
-
-    return records.filter(
-      (record) =>
-        normalizeCompany(record.training_sessions?.company_name) ===
-        normalizedCompany
-    );
-  }
-
   return records.filter(
     (record) => record.training_sessions?.owner_user_id === user?.id
   );
 }
 
 function filterSessionsByAttendanceAccess(sessions, user) {
-  const userEmail = user?.email?.trim().toLowerCase() || '';
-  const attendanceRecordsCompany = getAttendanceRecordsCompanyFromUser(user);
-
-  if (userEmail === SHAREPOINT_ARCHIVE_EMAIL) {
-    return sessions;
-  }
-
-  if (attendanceRecordsCompany) {
-    const normalizedCompany = normalizeCompany(attendanceRecordsCompany);
-
-    return sessions.filter(
-      (session) => normalizeCompany(session.company_name) === normalizedCompany
-    );
-  }
-
   return sessions.filter((session) => session.owner_user_id === user?.id);
 }
 
 function canManageAttendanceRecordsFromUser(user) {
-  return (
-    user?.email?.trim().toLowerCase() === SHAREPOINT_ARCHIVE_EMAIL ||
-    Boolean(getAttendanceRecordsCompanyFromUser(user))
-  );
+  return Boolean(getAttendanceRecordsCompanyFromUser(user));
 }
 
 function formatDateTime(value) {

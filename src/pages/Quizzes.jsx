@@ -6,8 +6,11 @@ import {
   canDeleteSavedQuizResults,
   canUseSavedQuizLibrary,
   getSavedQuizDraftLabel,
+  normalizeEmail,
 } from '../userFeatureAccess';
 import './Quiz.css';
+
+const EXCEEDSAFETY_EMAIL = 'exceedsafety@gmail.com';
 
 function formatDate(value) {
   if (!value) return 'Not provided';
@@ -127,6 +130,53 @@ async function fetchSavedQuizLibrary() {
   return readFunctionJson(response, 'Unable to load saved quiz library.');
 }
 
+async function fetchOwnSavedQuizzes(user) {
+  const selectOwnSavedQuizzes = (includeSavedFlag) => {
+    const savedQuizFields = includeSavedFlag
+      ? 'id, course_name, quiz_title, class_date, passing_score, is_active, results_saved, is_saved_template, quiz_duration_minutes, created_at, owner_user_id'
+      : 'id, course_name, quiz_title, class_date, passing_score, is_active, results_saved, quiz_duration_minutes, created_at, owner_user_id';
+
+    let query = supabase
+      .from('quiz_templates')
+      .select(savedQuizFields)
+      .eq('owner_user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    query = includeSavedFlag
+      ? query.eq('is_saved_template', true)
+      : query.eq('is_active', false).eq('results_saved', false);
+
+    return query;
+  };
+
+  let { data, error } = await selectOwnSavedQuizzes(true);
+
+  if (isMissingSavedTemplateColumn(error)) {
+    const fallbackResponse = await selectOwnSavedQuizzes(false);
+    data = fallbackResponse.data;
+    error = fallbackResponse.error;
+  }
+
+  if (error) throw error;
+
+  return data || [];
+}
+
+function mergeSavedQuizLists(ownQuizzes, sharedQuizzes) {
+  const savedQuizById = new Map();
+
+  for (const quiz of [...ownQuizzes, ...sharedQuizzes]) {
+    if (!quiz?.id || savedQuizById.has(quiz.id)) continue;
+    savedQuizById.set(quiz.id, quiz);
+  }
+
+  return [...savedQuizById.values()];
+}
+
+function shouldKeepExistingSavedQuizBehavior(user) {
+  return normalizeEmail(user?.email) === EXCEEDSAFETY_EMAIL;
+}
+
 function getSavedQuizOptionLabel(quiz) {
   return `${quiz.course_name || 'Untitled Course'} - ${
     quiz.quiz_title || 'Untitled Quiz'
@@ -163,6 +213,7 @@ export default function Quizzes() {
   const [errorMessage, setErrorMessage] = useState('');
   const [userPermissions, setUserPermissions] = useState({
     canUseSavedQuizLibrary: false,
+    canShowSavedQuizzesSection: false,
     canDeleteSavedQuizResults: true,
   });
 
@@ -173,13 +224,18 @@ export default function Quizzes() {
     try {
       const user = await getCurrentUser();
       const userCanUseSavedQuizLibrary = canUseSavedQuizLibrary(user);
+      const keepExistingSavedQuizBehavior =
+        shouldKeepExistingSavedQuizBehavior(user);
 
       setUserPermissions((currentPermissions) => ({
         ...currentPermissions,
         canUseSavedQuizLibrary: userCanUseSavedQuizLibrary,
+        canShowSavedQuizzesSection: keepExistingSavedQuizBehavior
+          ? userCanUseSavedQuizLibrary
+          : true,
       }));
 
-      if (!userCanUseSavedQuizLibrary) {
+      if (keepExistingSavedQuizBehavior && !userCanUseSavedQuizLibrary) {
         setAllSavedQuizzes([]);
         setSavedQuizzes([]);
         setSelectedSavedQuizId('');
@@ -187,9 +243,20 @@ export default function Quizzes() {
         return;
       }
 
-      await syncSavedQuizLibrary();
-      const libraryData = await fetchSavedQuizLibrary();
-      const allQuizzes = libraryData.savedQuizzes || [];
+      const ownQuizzes = keepExistingSavedQuizBehavior
+        ? []
+        : await fetchOwnSavedQuizzes(user);
+      let sharedQuizzes = [];
+
+      if (userCanUseSavedQuizLibrary) {
+        await syncSavedQuizLibrary();
+        const libraryData = await fetchSavedQuizLibrary();
+        sharedQuizzes = libraryData.savedQuizzes || [];
+      }
+
+      const allQuizzes = keepExistingSavedQuizBehavior
+        ? sharedQuizzes
+        : mergeSavedQuizLists(ownQuizzes, sharedQuizzes);
       const quizzes = allQuizzes.filter(isOriginalSavedQuizTemplate);
 
       setAllSavedQuizzes(allQuizzes);
@@ -469,7 +536,7 @@ export default function Quizzes() {
           </div>
         )}
 
-        {userPermissions.canUseSavedQuizLibrary && (
+        {userPermissions.canShowSavedQuizzesSection && (
         <section className="active-quiz-panel saved-quizzes-panel">
           <div className="quiz-section-header">
             <div>

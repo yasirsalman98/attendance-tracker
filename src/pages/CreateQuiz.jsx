@@ -238,6 +238,114 @@ async function fetchSavedQuizLibrary(params = {}) {
   return readFunctionJson(response, 'Unable to load saved quiz library.');
 }
 
+async function fetchOwnSavedQuizzes(user) {
+  const selectOwnSavedQuizzes = (includeSavedFlag) => {
+    const savedQuizFields = includeSavedFlag
+      ? `
+        id,
+        course_name,
+        quiz_title,
+        class_date,
+        passing_score,
+        is_active,
+        results_saved,
+        is_saved_template,
+        quiz_duration_minutes,
+        created_at,
+        owner_user_id
+      `
+      : `
+        id,
+        course_name,
+        quiz_title,
+        class_date,
+        passing_score,
+        is_active,
+        results_saved,
+        quiz_duration_minutes,
+        created_at,
+        owner_user_id
+      `;
+
+    let query = supabase
+      .from('quiz_templates')
+      .select(savedQuizFields)
+      .eq('owner_user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    query = includeSavedFlag
+      ? query.eq('is_saved_template', true)
+      : query.eq('is_active', false).eq('results_saved', false);
+
+    return query;
+  };
+
+  let { data, error } = await selectOwnSavedQuizzes(true);
+
+  if (isMissingSavedTemplateColumn(error)) {
+    const fallbackResponse = await selectOwnSavedQuizzes(false);
+    data = fallbackResponse.data;
+    error = fallbackResponse.error;
+  }
+
+  if (error) throw error;
+
+  return data || [];
+}
+
+async function fetchOwnSavedQuizDetails(quizId, user) {
+  const selectOwnSavedQuizDetails = (includeSavedFlag) => {
+    let query = supabase
+      .from('quiz_templates')
+      .select(`
+        *,
+        quiz_questions (
+          id,
+          question_text,
+          question_type,
+          sort_order,
+          quiz_answer_choices (
+            id,
+            choice_text,
+            is_correct,
+            sort_order
+          )
+        )
+      `)
+      .eq('id', quizId)
+      .eq('owner_user_id', user.id);
+
+    query = includeSavedFlag
+      ? query.eq('is_saved_template', true)
+      : query.eq('is_active', false).eq('results_saved', false);
+
+    return query;
+  };
+
+  let { data, error } = await selectOwnSavedQuizDetails(true).maybeSingle();
+
+  if (isMissingSavedTemplateColumn(error)) {
+    const fallbackResponse = await selectOwnSavedQuizDetails(false).maybeSingle();
+    data = fallbackResponse.data;
+    error = fallbackResponse.error;
+  }
+
+  if (error) throw error;
+
+  return data || null;
+}
+
+function mergeSavedQuizLists(ownQuizzes, sharedQuizzes) {
+  const savedQuizById = new Map();
+
+  for (const quiz of [...ownQuizzes, ...sharedQuizzes]) {
+    if (!quiz?.id || savedQuizById.has(quiz.id)) continue;
+    savedQuizById.set(quiz.id, quiz);
+  }
+
+  return [...savedQuizById.values()];
+}
+
 export default function CreateQuiz() {
   const qrCodeRef = useRef(null);
   const navigate = useNavigate();
@@ -269,7 +377,8 @@ export default function CreateQuiz() {
   const [liveRemainingSeconds, setLiveRemainingSeconds] = useState(null);
   const [savingResultsQuizId, setSavingResultsQuizId] = useState('');
   const [deletingSessionId, setDeletingSessionId] = useState('');
-  const [canLoadSavedQuizLibrary, setCanLoadSavedQuizLibrary] = useState(false);
+  const [canLoadSharedSavedQuizLibrary, setCanLoadSharedSavedQuizLibrary] =
+    useState(false);
   const [isSettingsAdmin, setIsSettingsAdmin] = useState(false);
   const lastScrolledQuizIdRef = useRef('');
   const autoSaveExpiredQuizIdRef = useRef('');
@@ -702,22 +811,21 @@ export default function CreateQuiz() {
 
     try {
       const user = await getCurrentUser();
-      const userCanLoadSavedQuizQuestions = canLoadSavedQuizQuestions(user);
+      const userCanLoadSharedSavedQuizLibrary = canLoadSavedQuizQuestions(user);
 
       setIsSettingsAdmin(isSettingsAdminUser(user));
-      setCanLoadSavedQuizLibrary(userCanLoadSavedQuizQuestions);
+      setCanLoadSharedSavedQuizLibrary(userCanLoadSharedSavedQuizLibrary);
 
-      if (!userCanLoadSavedQuizQuestions) {
-        setSavedQuizzes([]);
-        setSelectedSavedQuizId('');
-        setStatusMessage('');
-        setIsLoadingSavedQuizzes(false);
-        return;
+      const ownQuizzes = await fetchOwnSavedQuizzes(user);
+      let sharedQuizzes = [];
+
+      if (userCanLoadSharedSavedQuizLibrary) {
+        await syncSavedQuizLibrary();
+        const libraryData = await fetchSavedQuizLibrary();
+        sharedQuizzes = (libraryData.savedQuizzes || []).filter(isReusableSavedQuiz);
       }
 
-      await syncSavedQuizLibrary();
-      const libraryData = await fetchSavedQuizLibrary();
-      const quizzes = (libraryData.savedQuizzes || []).filter(isReusableSavedQuiz);
+      const quizzes = mergeSavedQuizLists(ownQuizzes, sharedQuizzes);
 
       setSavedQuizzes(quizzes);
       setSelectedSavedQuizId((currentId) =>
@@ -750,9 +858,18 @@ export default function CreateQuiz() {
     setIsLoadingQuizQuestions(true);
 
     try {
-      const { savedQuiz: data } = await fetchSavedQuizLibrary({
-        quizId: selectedSavedQuizId,
-      });
+      const user = await getCurrentUser();
+      const userCanLoadSharedSavedQuizLibrary =
+        canLoadSharedSavedQuizLibrary || canLoadSavedQuizQuestions(user);
+      let data = await fetchOwnSavedQuizDetails(selectedSavedQuizId, user);
+
+      if (!data && userCanLoadSharedSavedQuizLibrary) {
+        const libraryData = await fetchSavedQuizLibrary({
+          quizId: selectedSavedQuizId,
+        });
+
+        data = libraryData.savedQuiz || null;
+      }
 
       if (!data) {
         setStatusMessage('');
@@ -1439,7 +1556,7 @@ export default function CreateQuiz() {
 
         {!createdQuiz ? (
           <form className="quiz-form" onSubmit={handleSubmit}>
-            {!isEditingSavedQuiz && canLoadSavedQuizLibrary && (
+            {!isEditingSavedQuiz && (
               <section className="load-quiz-panel">
               <div>
                 <h2>Load Saved Quiz Questions</h2>

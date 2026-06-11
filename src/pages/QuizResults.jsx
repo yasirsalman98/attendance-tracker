@@ -245,6 +245,8 @@ export default function QuizResults() {
   }
 
   async function deleteQuiz() {
+    // DATA SAFETY: hard-deletes a saved quiz/results template. Prefer archive
+    // behavior for production data and keep this scoped to the owning user.
     if (!quizToDelete?.id) return;
 
     setIsDeletingQuiz(true);

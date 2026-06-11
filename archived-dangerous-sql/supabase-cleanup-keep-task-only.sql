@@ -1,3 +1,7 @@
+-- DANGER: This file deletes ExCourse attendance records, training sessions, signatures, and photos. Do not run this against production.
+-- This archived script is retained only for historical review.
+-- Any future cleanup requires written approval and a verified Supabase backup/export first.
+
 -- One-time cleanup: keep only classes where course_name is exactly "Task"
 -- after trimming spaces and ignoring letter case.
 --

@@ -103,6 +103,8 @@ async function addSignedUrl(client, bucketName, filePath) {
 }
 
 async function removeStorageFiles(client, bucketName, paths) {
+  // DATA SAFETY: removes signature/photo storage objects. Keep scoped to an
+  // approved user action and prefer soft-delete/archive behavior for new work.
   const cleanPaths = [...new Set((paths || []).filter(Boolean))];
 
   if (cleanPaths.length === 0) return;
@@ -160,6 +162,8 @@ export async function handler(event) {
   );
 
   if (event.httpMethod === 'DELETE') {
+    // DATA SAFETY: hard-deletes an attendance record, its signature/photo files,
+    // and the parent training session when it becomes empty.
     const body = JSON.parse(event.body || '{}');
     const recordId = String(body.recordId || '').trim();
 
@@ -251,6 +255,8 @@ export async function handler(event) {
         );
 
         const deleteSessionQuery = adminClient
+          // DATA SAFETY: training session hard delete. Convert this path to
+          // soft-delete/archive before expanding deletion behavior.
           .from('training_sessions')
           .delete()
           .eq('id', record.training_session_id)

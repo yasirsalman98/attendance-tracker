@@ -444,6 +444,8 @@ export default function Quizzes() {
 
     try {
       const userId = await getCurrentUserId();
+      // DATA SAFETY: hard-deletes a saved quiz template. Prefer archive
+      // behavior for production data and keep this scoped to the owning user.
       let { error } = await supabase
         .from('quiz_templates')
         .delete()

@@ -995,6 +995,8 @@ export default function CreateQuiz() {
 
         if (quizError) throw quizError;
 
+        // DATA SAFETY: hard-deletes existing draft questions before replacing
+        // them. Do not apply this pattern to student attempts/results.
         const { error: deleteQuestionsError } = await supabase
           .from('quiz_questions')
           .delete()
@@ -1134,6 +1136,8 @@ export default function CreateQuiz() {
 
       if (quizError) throw quizError;
 
+      // DATA SAFETY: hard-deletes saved quiz questions before replacing them.
+      // Do not apply this pattern to student attempts/results.
       const { error: deleteQuestionsError } = await supabase
         .from('quiz_questions')
         .delete()
@@ -1348,6 +1352,8 @@ export default function CreateQuiz() {
   }
 
   async function deleteCurrentSession() {
+    // DATA SAFETY: hard-deletes a quiz session/template. Prefer soft-delete or
+    // archive behavior before expanding this to student attempts/results.
     if (!createdQuiz?.id) return;
 
     const confirmed = window.confirm(

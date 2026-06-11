@@ -249,6 +249,7 @@ async function getSavedLibraryQuizKeys(adminClient, sourceUserId) {
 }
 
 async function removeSavedLibraryCopies(adminClient, sourceUserId, targetUserId) {
+  // DATA SAFETY: hard-deletes copied saved quiz library templates.
   const libraryQuizKeys = await getSavedLibraryQuizKeys(adminClient, sourceUserId);
 
   for (const quizKey of libraryQuizKeys) {

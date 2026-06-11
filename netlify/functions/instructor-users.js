@@ -230,6 +230,8 @@ function getUniqueValues(values) {
 }
 
 async function removeStorageFiles(adminClient, bucketName, paths) {
+  // DATA SAFETY: removes uploaded template files. Do not reuse this helper for
+  // ExCourse attendance/signature/photo data without written approval.
   const uniquePaths = getUniqueValues(paths);
 
   if (uniquePaths.length === 0) return;
@@ -373,6 +375,9 @@ async function uploadCustomTemplates(adminClient, userId, importOptions, templat
 }
 
 async function deleteOwnedData(adminClient, userId) {
+  // DATA SAFETY: hard-deletes a user's attendance records, training sessions,
+  // quiz templates, and uploaded template files during account cleanup/import.
+  // Prefer soft-delete/archive for future production data changes.
   const { data: sessions, error: sessionsError } = await adminClient
     .from('training_sessions')
     .select('id, trainer_signature_path')
@@ -614,6 +619,7 @@ async function getSavedLibraryQuizKeys(adminClient, sourceUserId) {
 }
 
 async function removeSavedLibraryCopies(adminClient, sourceUserId, targetUserId) {
+  // DATA SAFETY: hard-deletes copied saved quiz library templates.
   const libraryQuizKeys = await getSavedLibraryQuizKeys(adminClient, sourceUserId);
 
   for (const quizKey of libraryQuizKeys) {
@@ -653,6 +659,7 @@ async function getSavedResultQuizKeys(adminClient, sourceUserId) {
 }
 
 async function removeSavedResultCopies(adminClient, sourceUserId, targetUserId) {
+  // DATA SAFETY: hard-deletes copied saved quiz result templates.
   const savedResultQuizKeys = await getSavedResultQuizKeys(adminClient, sourceUserId);
 
   for (const quizKey of savedResultQuizKeys) {

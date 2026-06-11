@@ -10,7 +10,8 @@
     "build": "npm run safety:check && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "safety:check": "node scripts/check-dangerous-sql.js"
+    "safety:check": "node scripts/check-dangerous-sql.js",
+    "backup:storage": "node scripts/backup-storage.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",

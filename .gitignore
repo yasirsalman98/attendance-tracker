@@ -13,6 +13,7 @@ dist-ssr
 *.local
 server/tmp
 server/templates/extracted
+storage-backups/
 
 # Editor directories and files
 .vscode/*

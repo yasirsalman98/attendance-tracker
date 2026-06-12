@@ -6,11 +6,19 @@ import {
   canDeleteSavedQuizResults,
   canUseSavedQuizLibrary,
   getSavedQuizDraftLabel,
+  isSettingsAdminUser,
   normalizeEmail,
 } from '../userFeatureAccess';
 import './Quiz.css';
 
 const EXCEEDSAFETY_EMAIL = 'exceedsafety@gmail.com';
+const ARCHIVE_RETENTION_DAYS = 30;
+const ARCHIVE_SOURCE_LABELS = {
+  saved_quiz: 'Saved Quizzes',
+  saved_quiz_results: 'Saved Quiz Results',
+};
+const ARCHIVE_MIGRATION_MESSAGE =
+  'Archive requires database migration before it can be used.';
 
 function formatDate(value) {
   if (!value) return 'Not provided';
@@ -44,12 +52,6 @@ async function getCurrentUser() {
   }
 
   return data.user;
-}
-
-async function getCurrentUserId() {
-  const user = await getCurrentUser();
-
-  return user.id;
 }
 
 async function getCurrentAccessToken() {
@@ -130,17 +132,110 @@ async function fetchSavedQuizLibrary() {
   return readFunctionJson(response, 'Unable to load saved quiz library.');
 }
 
+function formatDateTime(value) {
+  if (!value) return 'Not provided';
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Not provided';
+
+  return date.toLocaleString();
+}
+
+function getArchiveDate(value) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return null;
+
+  return date;
+}
+
+function buildArchivePayload(user, archiveSource) {
+  const archivedAt = new Date();
+  const archiveDeleteAfter = new Date(archivedAt);
+  archiveDeleteAfter.setDate(archiveDeleteAfter.getDate() + ARCHIVE_RETENTION_DAYS);
+
+  return {
+    archived_at: archivedAt.toISOString(),
+    archived_by: user.id,
+    archive_delete_after: archiveDeleteAfter.toISOString(),
+    archive_source: archiveSource,
+  };
+}
+
+function getArchiveSourceLabel(quiz) {
+  return ARCHIVE_SOURCE_LABELS[quiz.archive_source] || 'Archived Quiz';
+}
+
+function getArchiveDeleteStatus(quiz) {
+  const deleteAfter = getArchiveDate(quiz.archive_delete_after);
+
+  if (!deleteAfter) return 'Permanent delete date not set';
+
+  if (deleteAfter.getTime() <= Date.now()) {
+    return 'Eligible for permanent delete';
+  }
+
+  return `Permanent delete after ${formatDateTime(quiz.archive_delete_after)}`;
+}
+
+function isMissingArchiveColumn(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return (
+    (error?.code === '42703' || message.includes('column')) &&
+    (message.includes('archived_at') ||
+      message.includes('archived_by') ||
+      message.includes('archive_delete_after') ||
+      message.includes('archive_source'))
+  );
+}
+
+async function archiveSavedQuizInLibrary(quizId, archiveSource) {
+  const accessToken = await getCurrentAccessToken();
+  const response = await fetch(getSavedQuizLibraryUrl(), {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ quizId, archiveSource }),
+  });
+
+  return readFunctionJson(response, 'Unable to archive saved quiz.');
+}
+
+async function restoreArchivedQuizInLibrary(quizId) {
+  const accessToken = await getCurrentAccessToken();
+  const response = await fetch(getSavedQuizLibraryUrl(), {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ quizId, action: 'restore' }),
+  });
+
+  return readFunctionJson(response, 'Unable to restore archived quiz.');
+}
+
 async function fetchOwnSavedQuizzes(user) {
-  const selectOwnSavedQuizzes = (includeSavedFlag) => {
+  const selectOwnSavedQuizzes = (includeSavedFlag, includeArchiveFields) => {
     const savedQuizFields = includeSavedFlag
+      ? 'id, course_name, quiz_title, class_date, passing_score, is_active, results_saved, is_saved_template, quiz_duration_minutes, created_at, owner_user_id, archived_at, archived_by, archive_delete_after, archive_source'
+      : 'id, course_name, quiz_title, class_date, passing_score, is_active, results_saved, quiz_duration_minutes, created_at, owner_user_id, archived_at, archived_by, archive_delete_after, archive_source';
+    const fallbackSavedQuizFields = includeSavedFlag
       ? 'id, course_name, quiz_title, class_date, passing_score, is_active, results_saved, is_saved_template, quiz_duration_minutes, created_at, owner_user_id'
       : 'id, course_name, quiz_title, class_date, passing_score, is_active, results_saved, quiz_duration_minutes, created_at, owner_user_id';
 
     let query = supabase
       .from('quiz_templates')
-      .select(savedQuizFields)
+      .select(includeArchiveFields ? savedQuizFields : fallbackSavedQuizFields)
       .eq('owner_user_id', user.id)
       .order('created_at', { ascending: false });
+
+    if (includeArchiveFields) {
+      query = query.is('archived_at', null);
+    }
 
     query = includeSavedFlag
       ? query.eq('is_saved_template', true)
@@ -149,17 +244,41 @@ async function fetchOwnSavedQuizzes(user) {
     return query;
   };
 
-  let { data, error } = await selectOwnSavedQuizzes(true);
+  let archiveColumnsAvailable = true;
+  let { data, error } = await selectOwnSavedQuizzes(true, true);
 
-  if (isMissingSavedTemplateColumn(error)) {
-    const fallbackResponse = await selectOwnSavedQuizzes(false);
+  if (isMissingArchiveColumn(error)) {
+    archiveColumnsAvailable = false;
+    const fallbackResponse = await selectOwnSavedQuizzes(true, false);
     data = fallbackResponse.data;
     error = fallbackResponse.error;
   }
 
+  if (isMissingSavedTemplateColumn(error)) {
+    const fallbackResponse = await selectOwnSavedQuizzes(
+      false,
+      archiveColumnsAvailable
+    );
+    data = fallbackResponse.data;
+    error = fallbackResponse.error;
+
+    if (isMissingArchiveColumn(error)) {
+      archiveColumnsAvailable = false;
+      const noArchiveFallbackResponse = await selectOwnSavedQuizzes(
+        false,
+        false
+      );
+      data = noArchiveFallbackResponse.data;
+      error = noArchiveFallbackResponse.error;
+    }
+  }
+
   if (error) throw error;
 
-  return data || [];
+  return {
+    archiveColumnsAvailable,
+    quizzes: data || [],
+  };
 }
 
 function mergeSavedQuizLists(ownQuizzes, sharedQuizzes) {
@@ -193,6 +312,82 @@ function isOriginalSavedQuizTemplate(quiz) {
   return isSavedTemplate && !/\bcopy$/i.test(quizTitle);
 }
 
+function getEditableSavedQuizzes(user, allQuizzes) {
+  return isSettingsAdminUser(user)
+    ? allQuizzes
+    : allQuizzes.filter(isOriginalSavedQuizTemplate);
+}
+
+async function archiveSavedQuizTemplateById(quizId, user) {
+  if (isSettingsAdminUser(user)) {
+    return archiveSavedQuizInLibrary(quizId, 'saved_quiz');
+  }
+
+  const applyOwnerFilter = !isSettingsAdminUser(user);
+  const applyOwnerScope = (query) =>
+    applyOwnerFilter ? query.eq('owner_user_id', user.id) : query;
+  const archivePayload = buildArchivePayload(user, 'saved_quiz');
+
+  let archiveQuery = supabase
+    .from('quiz_templates')
+    .update(archivePayload)
+    .eq('id', quizId)
+    .eq('is_saved_template', true)
+    .is('archived_at', null);
+  archiveQuery = applyOwnerScope(archiveQuery);
+  let { data, error } = await archiveQuery.select('id');
+
+  if (isMissingSavedTemplateColumn(error)) {
+    let fallbackArchiveQuery = supabase
+      .from('quiz_templates')
+      .update(archivePayload)
+      .eq('id', quizId)
+      .eq('is_active', false)
+      .eq('results_saved', false)
+      .is('archived_at', null);
+    fallbackArchiveQuery = applyOwnerScope(fallbackArchiveQuery);
+
+    const fallbackResponse = await fallbackArchiveQuery.select('id');
+    data = fallbackResponse.data;
+    error = fallbackResponse.error;
+  }
+
+  if (error) throw error;
+
+  if (!Array.isArray(data) || data.length === 0) {
+    throw new Error('No saved quiz was archived. Refresh and try again.');
+  }
+
+  return data;
+}
+
+async function restoreArchivedQuizById(quizId, user) {
+  if (isSettingsAdminUser(user)) {
+    return restoreArchivedQuizInLibrary(quizId);
+  }
+
+  const { data, error } = await supabase
+    .from('quiz_templates')
+    .update({
+      archived_at: null,
+      archived_by: null,
+      archive_delete_after: null,
+      archive_source: null,
+    })
+    .eq('id', quizId)
+    .eq('owner_user_id', user.id)
+    .not('archived_at', 'is', null)
+    .select('id');
+
+  if (error) throw error;
+
+  if (!Array.isArray(data) || data.length === 0) {
+    throw new Error('No archived quiz was restored. Refresh and try again.');
+  }
+
+  return data;
+}
+
 function isMissingSavedTemplateColumn(error) {
   return String(error?.message || '').toLowerCase().includes('is_saved_template');
 }
@@ -207,6 +402,10 @@ export default function Quizzes() {
   const [deletingCopiedQuizId, setDeletingCopiedQuizId] = useState('');
   const [savedResultQuizzes, setSavedResultQuizzes] = useState([]);
   const [isLoadingSavedResults, setIsLoadingSavedResults] = useState(false);
+  const [archivedQuizzes, setArchivedQuizzes] = useState([]);
+  const [isLoadingArchivedQuizzes, setIsLoadingArchivedQuizzes] = useState(false);
+  const [archiveColumnsAvailable, setArchiveColumnsAvailable] = useState(null);
+  const [restoringArchivedQuizId, setRestoringArchivedQuizId] = useState('');
   const [downloadingResultsQuizId, setDownloadingResultsQuizId] = useState('');
   const [deletingSavedResultQuizId, setDeletingSavedResultQuizId] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
@@ -215,6 +414,7 @@ export default function Quizzes() {
     canUseSavedQuizLibrary: false,
     canShowSavedQuizzesSection: false,
     canDeleteSavedQuizResults: true,
+    canViewArchivedQuizzes: false,
   });
 
   const loadSavedQuizzes = useCallback(async function loadSavedQuizzes() {
@@ -233,6 +433,7 @@ export default function Quizzes() {
         canShowSavedQuizzesSection: keepExistingSavedQuizBehavior
           ? userCanUseSavedQuizLibrary
           : true,
+        canViewArchivedQuizzes: isSettingsAdminUser(user),
       }));
 
       if (keepExistingSavedQuizBehavior && !userCanUseSavedQuizLibrary) {
@@ -243,21 +444,29 @@ export default function Quizzes() {
         return;
       }
 
-      const ownQuizzes = keepExistingSavedQuizBehavior
-        ? []
-        : await fetchOwnSavedQuizzes(user);
+      let ownQuizzes = [];
+
+      if (!keepExistingSavedQuizBehavior) {
+        const ownQuizzesResponse = await fetchOwnSavedQuizzes(user);
+        ownQuizzes = ownQuizzesResponse.quizzes;
+        setArchiveColumnsAvailable(ownQuizzesResponse.archiveColumnsAvailable);
+      }
+
       let sharedQuizzes = [];
 
       if (userCanUseSavedQuizLibrary) {
         await syncSavedQuizLibrary();
         const libraryData = await fetchSavedQuizLibrary();
         sharedQuizzes = libraryData.savedQuizzes || [];
+        if (typeof libraryData.archiveColumnsAvailable === 'boolean') {
+          setArchiveColumnsAvailable(libraryData.archiveColumnsAvailable);
+        }
       }
 
       const allQuizzes = keepExistingSavedQuizBehavior
         ? sharedQuizzes
         : mergeSavedQuizLists(ownQuizzes, sharedQuizzes);
-      const quizzes = allQuizzes.filter(isOriginalSavedQuizTemplate);
+      const quizzes = getEditableSavedQuizzes(user, allQuizzes);
 
       setAllSavedQuizzes(allQuizzes);
       setSavedQuizzes(quizzes);
@@ -287,20 +496,44 @@ export default function Quizzes() {
 
     try {
       const user = await getCurrentUser();
-      const userId = user.id;
       const userCanDeleteSavedQuizResults = canDeleteSavedQuizResults(user);
 
       setUserPermissions((currentPermissions) => ({
         ...currentPermissions,
         canDeleteSavedQuizResults: userCanDeleteSavedQuizResults,
+        canViewArchivedQuizzes: isSettingsAdminUser(user),
       }));
 
-      const { data, error } = await supabase
-        .from('quiz_templates')
-        .select('id, course_name, quiz_title, class_date, passing_score, quiz_duration_minutes, is_active, results_saved, created_at')
-        .eq('owner_user_id', userId)
-        .eq('results_saved', true)
-        .order('created_at', { ascending: false });
+      const selectSavedResults = (includeArchiveFields) => {
+        let query = supabase
+          .from('quiz_templates')
+          .select(
+            includeArchiveFields
+              ? 'id, course_name, quiz_title, class_date, passing_score, quiz_duration_minutes, is_active, results_saved, created_at, owner_user_id, archived_at, archived_by, archive_delete_after, archive_source'
+              : 'id, course_name, quiz_title, class_date, passing_score, quiz_duration_minutes, is_active, results_saved, created_at, owner_user_id'
+          )
+          .eq('results_saved', true)
+          .order('created_at', { ascending: false });
+
+        if (includeArchiveFields) {
+          query = query.is('archived_at', null);
+        }
+
+        if (!isSettingsAdminUser(user)) {
+          query = query.eq('owner_user_id', user.id);
+        }
+
+        return query;
+      };
+
+      let { data, error } = await selectSavedResults(true);
+
+      if (isMissingArchiveColumn(error)) {
+        setArchiveColumnsAvailable(false);
+        const fallbackResponse = await selectSavedResults(false);
+        data = fallbackResponse.data;
+        error = fallbackResponse.error;
+      }
 
       if (error) throw error;
 
@@ -313,14 +546,58 @@ export default function Quizzes() {
     }
   }, []);
 
+  const loadArchivedQuizzes = useCallback(async function loadArchivedQuizzes() {
+    setIsLoadingArchivedQuizzes(true);
+    setErrorMessage('');
+
+    try {
+      const user = await getCurrentUser();
+
+      setUserPermissions((currentPermissions) => ({
+        ...currentPermissions,
+        canViewArchivedQuizzes: isSettingsAdminUser(user),
+      }));
+
+      if (!isSettingsAdminUser(user)) {
+        setArchivedQuizzes([]);
+        return;
+      }
+
+      let archivedQuery = supabase
+        .from('quiz_templates')
+        .select('id, owner_user_id, course_name, quiz_title, class_date, passing_score, quiz_duration_minutes, is_active, results_saved, created_at, archived_at, archived_by, archive_delete_after, archive_source')
+        .not('archived_at', 'is', null)
+        .order('archived_at', { ascending: false });
+
+      const { data, error } = await archivedQuery;
+
+      if (isMissingArchiveColumn(error)) {
+        setArchiveColumnsAvailable(false);
+        setArchivedQuizzes([]);
+        return;
+      }
+
+      if (error) throw error;
+
+      setArchiveColumnsAvailable(true);
+      setArchivedQuizzes(data || []);
+    } catch (error) {
+      console.error('Load archived quizzes error:', error);
+      setArchivedQuizzes([]);
+      setErrorMessage(error?.message || 'Unable to load archived quizzes.');
+    } finally {
+      setIsLoadingArchivedQuizzes(false);
+    }
+  }, []);
+
   async function downloadSavedQuizResults(quiz) {
     setDownloadingResultsQuizId(quiz.id);
     setErrorMessage('');
     setStatusMessage('');
 
     try {
-      const userId = await getCurrentUserId();
-      const { data: fullQuiz, error: quizError } = await supabase
+      const user = await getCurrentUser();
+      let fullQuizQuery = supabase
         .from('quiz_templates')
         .select(`
           *,
@@ -337,8 +614,47 @@ export default function Quizzes() {
           )
         `)
         .eq('id', quiz.id)
-        .eq('owner_user_id', userId)
-        .single();
+        .eq('results_saved', true)
+        .is('archived_at', null);
+
+      if (!isSettingsAdminUser(user)) {
+        fullQuizQuery = fullQuizQuery.eq('owner_user_id', user.id);
+      }
+
+      let { data: fullQuiz, error: quizError } = await fullQuizQuery.single();
+
+      if (isMissingArchiveColumn(quizError)) {
+        let fallbackFullQuizQuery = supabase
+          .from('quiz_templates')
+          .select(`
+            *,
+            quiz_questions (
+              id,
+              question_text,
+              sort_order,
+              quiz_answer_choices (
+                id,
+                choice_text,
+                is_correct,
+                sort_order
+              )
+            )
+          `)
+          .eq('id', quiz.id)
+          .eq('results_saved', true);
+
+        if (!isSettingsAdminUser(user)) {
+          fallbackFullQuizQuery = fallbackFullQuizQuery.eq(
+            'owner_user_id',
+            user.id
+          );
+        }
+
+        const fallbackResponse = await fallbackFullQuizQuery.single();
+        fullQuiz = fallbackResponse.data;
+        quizError = fallbackResponse.error;
+        setArchiveColumnsAvailable(false);
+      }
 
       if (quizError) throw quizError;
 
@@ -369,11 +685,8 @@ export default function Quizzes() {
   }
 
   async function deleteSavedQuizResult(quiz) {
-    const quizLabel = `${quiz.course_name || 'Untitled Course'} - ${
-      quiz.quiz_title || 'Untitled Quiz'
-    }`;
     const confirmed = window.confirm(
-      `Remove ${quizLabel} from Saved Quiz Results? This will not delete student answers.`
+      'Archive this saved result? It will move to Archived Quizzes for 30 days.'
     );
 
     if (!confirmed) return;
@@ -383,28 +696,58 @@ export default function Quizzes() {
     setStatusMessage('');
 
     try {
-      if (!userPermissions.canDeleteSavedQuizResults) {
-        setErrorMessage('This email cannot delete saved quiz results.');
+      if (archiveColumnsAvailable === false) {
+        setErrorMessage(ARCHIVE_MIGRATION_MESSAGE);
         return;
       }
 
-      const userId = await getCurrentUserId();
-      const { error } = await supabase
+      if (!userPermissions.canDeleteSavedQuizResults) {
+        setErrorMessage('This email cannot archive saved quiz results.');
+        return;
+      }
+
+      const user = await getCurrentUser();
+      if (isSettingsAdminUser(user)) {
+        await archiveSavedQuizInLibrary(quiz.id, 'saved_quiz_results');
+        setSavedResultQuizzes((currentQuizzes) =>
+          currentQuizzes.filter((savedQuiz) => savedQuiz.id !== quiz.id)
+        );
+        await loadArchivedQuizzes();
+        setStatusMessage('Saved result archived.');
+        return;
+      }
+
+      const archivePayload = buildArchivePayload(user, 'saved_quiz_results');
+      let archiveQuery = supabase
         .from('quiz_templates')
-        .update({ results_saved: false })
+        .update(archivePayload)
         .eq('id', quiz.id)
-        .eq('owner_user_id', userId)
-        .eq('results_saved', true);
+        .eq('results_saved', true)
+        .is('archived_at', null);
+
+      archiveQuery = archiveQuery.eq('owner_user_id', user.id);
+
+      const { data: archivedRows, error } = await archiveQuery.select('id');
 
       if (error) throw error;
+
+      if (!Array.isArray(archivedRows) || archivedRows.length !== 1) {
+        throw new Error('No saved quiz result was archived. Refresh and try again.');
+      }
 
       setSavedResultQuizzes((currentQuizzes) =>
         currentQuizzes.filter((savedQuiz) => savedQuiz.id !== quiz.id)
       );
-      setStatusMessage('Saved quiz result removed.');
+      await loadArchivedQuizzes();
+      setStatusMessage('Saved result archived.');
     } catch (error) {
-      console.error('Delete saved quiz result error:', error);
-      setErrorMessage(error?.message || 'Unable to delete saved quiz result.');
+      console.error('Archive saved quiz result error:', error);
+      if (isMissingArchiveColumn(error)) {
+        setArchiveColumnsAvailable(false);
+        setErrorMessage(ARCHIVE_MIGRATION_MESSAGE);
+      } else {
+        setErrorMessage(error?.message || 'Unable to archive saved quiz result.');
+      }
     } finally {
       setDeletingSavedResultQuizId('');
     }
@@ -433,7 +776,7 @@ export default function Quizzes() {
 
     const quizLabel = getSavedQuizOptionLabel(selectedQuiz);
     const confirmed = window.confirm(
-      `Delete ${quizLabel}? This will permanently delete this saved quiz.`
+      `Archive ${quizLabel}? It will stay in Archived Quizzes for 30 days before it can be permanently deleted.`
     );
 
     if (!confirmed) return;
@@ -443,35 +786,20 @@ export default function Quizzes() {
     setStatusMessage('');
 
     try {
-      const userId = await getCurrentUserId();
-      // DATA SAFETY: hard-deletes a saved quiz template. Prefer archive
-      // behavior for production data and keep this scoped to the owning user.
-      let { error } = await supabase
-        .from('quiz_templates')
-        .delete()
-        .eq('id', selectedQuiz.id)
-        .eq('owner_user_id', userId)
-        .eq('is_saved_template', true);
-
-      if (isMissingSavedTemplateColumn(error)) {
-        const fallbackResponse = await supabase
-          .from('quiz_templates')
-          .delete()
-          .eq('id', selectedQuiz.id)
-          .eq('owner_user_id', userId)
-          .eq('is_active', false)
-          .eq('results_saved', false);
-
-        error = fallbackResponse.error;
+      if (archiveColumnsAvailable === false) {
+        setErrorMessage(ARCHIVE_MIGRATION_MESSAGE);
+        return;
       }
 
-      if (error) throw error;
+      const user = await getCurrentUser();
+      await archiveSavedQuizTemplateById(selectedQuiz.id, user);
 
       const nextAllSavedQuizzes = allSavedQuizzes.filter(
         (quiz) => quiz.id !== selectedQuiz.id
       );
-      const nextSavedQuizzes = nextAllSavedQuizzes.filter(
-        isOriginalSavedQuizTemplate
+      const nextSavedQuizzes = getEditableSavedQuizzes(
+        user,
+        nextAllSavedQuizzes
       );
 
       setAllSavedQuizzes(nextAllSavedQuizzes);
@@ -482,19 +810,65 @@ export default function Quizzes() {
           : nextSavedQuizzes[0]?.id || ''
       );
       setSelectedCopiedQuizId('');
-      setStatusMessage('Saved quiz deleted.');
+      await loadArchivedQuizzes();
+      setStatusMessage('Saved quiz archived.');
     } catch (error) {
       console.error('Delete copied quiz error:', error);
-      setErrorMessage(error?.message || 'Unable to delete saved quiz.');
+      if (isMissingArchiveColumn(error)) {
+        setArchiveColumnsAvailable(false);
+        setErrorMessage(ARCHIVE_MIGRATION_MESSAGE);
+      } else {
+        setErrorMessage(error?.message || 'Unable to delete saved quiz.');
+      }
     } finally {
       setDeletingCopiedQuizId('');
+    }
+  }
+
+  async function restoreArchivedQuiz(quiz) {
+    if (!quiz?.id) return;
+
+    const confirmed = window.confirm(
+      'Restore this quiz? It will return to its original section.'
+    );
+
+    if (!confirmed) return;
+
+    setRestoringArchivedQuizId(quiz.id);
+    setErrorMessage('');
+    setStatusMessage('');
+
+    try {
+      const user = await getCurrentUser();
+      if (!isSettingsAdminUser(user)) {
+        throw new Error('Only the admin account can restore archived quizzes.');
+      }
+
+      await restoreArchivedQuizById(quiz.id, user);
+      await Promise.all([
+        loadSavedQuizzes(),
+        loadSavedResultQuizzes(),
+        loadArchivedQuizzes(),
+      ]);
+      setStatusMessage('Archived quiz restored.');
+    } catch (error) {
+      console.error('Restore archived quiz error:', error);
+      if (isMissingArchiveColumn(error)) {
+        setArchiveColumnsAvailable(false);
+        setErrorMessage(ARCHIVE_MIGRATION_MESSAGE);
+      } else {
+        setErrorMessage(error?.message || 'Unable to restore archived quiz.');
+      }
+    } finally {
+      setRestoringArchivedQuizId('');
     }
   }
 
   const refreshQuizPage = useCallback(function refreshQuizPage() {
     loadSavedQuizzes();
     loadSavedResultQuizzes();
-  }, [loadSavedQuizzes, loadSavedResultQuizzes]);
+    loadArchivedQuizzes();
+  }, [loadSavedQuizzes, loadSavedResultQuizzes, loadArchivedQuizzes]);
 
   useEffect(() => {
     Promise.resolve().then(() => {
@@ -518,9 +892,15 @@ export default function Quizzes() {
             type="button"
             className="secondary-button"
             onClick={refreshQuizPage}
-            disabled={isLoadingSavedQuizzes || isLoadingSavedResults}
+            disabled={
+              isLoadingSavedQuizzes ||
+              isLoadingSavedResults ||
+              isLoadingArchivedQuizzes
+            }
           >
-            {isLoadingSavedQuizzes || isLoadingSavedResults
+            {isLoadingSavedQuizzes ||
+            isLoadingSavedResults ||
+            isLoadingArchivedQuizzes
               ? 'Refreshing...'
               : 'Refresh'}
           </button>
@@ -596,13 +976,14 @@ export default function Quizzes() {
                 onClick={deleteSelectedCopiedQuiz}
                 disabled={
                   !selectedCopiedQuizId ||
-                  deletingCopiedQuizId === selectedCopiedQuizId
+                  deletingCopiedQuizId === selectedCopiedQuizId ||
+                  archiveColumnsAvailable === false
                 }
               >
                 {selectedCopiedQuizId &&
                 deletingCopiedQuizId === selectedCopiedQuizId
-                  ? 'Deleting...'
-                  : 'Delete Quiz'}
+                  ? 'Archiving...'
+                  : 'Archive Quiz'}
               </button>
             </div>
           )}
@@ -667,15 +1048,18 @@ export default function Quizzes() {
                       <button
                         type="button"
                         className="quiz-delete-icon-button"
-                        aria-label={`Delete saved result for ${
+                        aria-label={`Archive saved result for ${
                           quiz.course_name || 'Untitled Course'
                         } - ${quiz.quiz_title || 'Untitled Quiz'}`}
-                        title="Delete saved result"
+                        title="Archive saved result"
                         onClick={(event) => {
                           event.stopPropagation();
                           deleteSavedQuizResult(quiz);
                         }}
-                        disabled={deletingSavedResultQuizId === quiz.id}
+                        disabled={
+                          deletingSavedResultQuizId === quiz.id ||
+                          archiveColumnsAvailable === false
+                        }
                       >
                         <svg
                           aria-hidden="true"
@@ -702,6 +1086,54 @@ export default function Quizzes() {
             </div>
           )}
         </section>
+
+        {userPermissions.canViewArchivedQuizzes && (
+          <section className="active-quiz-panel archived-quizzes-panel">
+            <div className="quiz-section-header">
+              <div>
+                <h2>Archived Quizzes</h2>
+              </div>
+            </div>
+
+            {isLoadingArchivedQuizzes ? (
+              <p className="muted">Loading archived quizzes...</p>
+            ) : archiveColumnsAvailable === false ? (
+              <p className="muted">{ARCHIVE_MIGRATION_MESSAGE}</p>
+            ) : archivedQuizzes.length === 0 ? (
+              <p className="muted">No archived quizzes.</p>
+            ) : (
+              <div className="active-quiz-list">
+                {archivedQuizzes.map((quiz) => (
+                  <div className="active-quiz-row" key={quiz.id}>
+                    <div>
+                      <strong>
+                        {quiz.course_name || 'Untitled Course'} -{' '}
+                        {quiz.quiz_title || 'Untitled Quiz'}
+                      </strong>
+                      <div className="active-quiz-meta">
+                        <span>{getArchiveSourceLabel(quiz)}</span>
+                        <span>Archived: {formatDateTime(quiz.archived_at)}</span>
+                        <span>{getArchiveDeleteStatus(quiz)}</span>
+                      </div>
+                    </div>
+                    <div className="active-quiz-actions">
+                      <button
+                        type="button"
+                        className="secondary-button compact-link-button"
+                        onClick={() => restoreArchivedQuiz(quiz)}
+                        disabled={restoringArchivedQuizId === quiz.id}
+                      >
+                        {restoringArchivedQuizId === quiz.id
+                          ? 'Restoring...'
+                          : 'Restore'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
       </div>
     </section>
   );

@@ -91,6 +91,18 @@ function isMissingSavedTemplateColumn(error) {
   return String(error?.message || '').toLowerCase().includes('is_saved_template');
 }
 
+function isMissingArchiveColumn(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return (
+    (error?.code === '42703' || message.includes('column')) &&
+    (message.includes('archived_at') ||
+      message.includes('archived_by') ||
+      message.includes('archive_delete_after') ||
+      message.includes('archive_source'))
+  );
+}
+
 function createChoice(text = '') {
   return {
     id: crypto.randomUUID(),
@@ -238,8 +250,28 @@ async function fetchSavedQuizLibrary(params = {}) {
   return readFunctionJson(response, 'Unable to load saved quiz library.');
 }
 
+async function updateSavedQuizInLibrary({ quizId, quiz, questions }) {
+  const accessToken = await getCurrentAccessToken();
+
+  const response = await fetch(getSavedQuizLibraryUrl(), {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'update_saved_quiz',
+      quizId,
+      quiz,
+      questions,
+    }),
+  });
+
+  return readFunctionJson(response, 'Unable to update the saved quiz.');
+}
+
 async function fetchOwnSavedQuizzes(user) {
-  const selectOwnSavedQuizzes = (includeSavedFlag) => {
+  const selectOwnSavedQuizzes = (includeSavedFlag, includeArchiveFilter) => {
     const savedQuizFields = includeSavedFlag
       ? `
         id,
@@ -273,6 +305,10 @@ async function fetchOwnSavedQuizzes(user) {
       .eq('owner_user_id', user.id)
       .order('created_at', { ascending: false });
 
+    if (includeArchiveFilter) {
+      query = query.is('archived_at', null);
+    }
+
     query = includeSavedFlag
       ? query.eq('is_saved_template', true)
       : query.eq('is_active', false).eq('results_saved', false);
@@ -280,12 +316,29 @@ async function fetchOwnSavedQuizzes(user) {
     return query;
   };
 
-  let { data, error } = await selectOwnSavedQuizzes(true);
+  let archiveColumnsAvailable = true;
+  let { data, error } = await selectOwnSavedQuizzes(true, true);
 
-  if (isMissingSavedTemplateColumn(error)) {
-    const fallbackResponse = await selectOwnSavedQuizzes(false);
+  if (isMissingArchiveColumn(error)) {
+    archiveColumnsAvailable = false;
+    const fallbackResponse = await selectOwnSavedQuizzes(true, false);
     data = fallbackResponse.data;
     error = fallbackResponse.error;
+  }
+
+  if (isMissingSavedTemplateColumn(error)) {
+    const fallbackResponse = await selectOwnSavedQuizzes(
+      false,
+      archiveColumnsAvailable
+    );
+    data = fallbackResponse.data;
+    error = fallbackResponse.error;
+
+    if (isMissingArchiveColumn(error)) {
+      const noArchiveFallbackResponse = await selectOwnSavedQuizzes(false, false);
+      data = noArchiveFallbackResponse.data;
+      error = noArchiveFallbackResponse.error;
+    }
   }
 
   if (error) throw error;
@@ -294,7 +347,7 @@ async function fetchOwnSavedQuizzes(user) {
 }
 
 async function fetchOwnSavedQuizDetails(quizId, user) {
-  const selectOwnSavedQuizDetails = (includeSavedFlag) => {
+  const selectOwnSavedQuizDetails = (includeSavedFlag, includeArchiveFilter) => {
     let query = supabase
       .from('quiz_templates')
       .select(`
@@ -315,6 +368,10 @@ async function fetchOwnSavedQuizDetails(quizId, user) {
       .eq('id', quizId)
       .eq('owner_user_id', user.id);
 
+    if (includeArchiveFilter) {
+      query = query.is('archived_at', null);
+    }
+
     query = includeSavedFlag
       ? query.eq('is_saved_template', true)
       : query.eq('is_active', false).eq('results_saved', false);
@@ -322,12 +379,35 @@ async function fetchOwnSavedQuizDetails(quizId, user) {
     return query;
   };
 
-  let { data, error } = await selectOwnSavedQuizDetails(true).maybeSingle();
+  let archiveColumnsAvailable = true;
+  let { data, error } = await selectOwnSavedQuizDetails(true, true).maybeSingle();
 
-  if (isMissingSavedTemplateColumn(error)) {
-    const fallbackResponse = await selectOwnSavedQuizDetails(false).maybeSingle();
+  if (isMissingArchiveColumn(error)) {
+    archiveColumnsAvailable = false;
+    const fallbackResponse = await selectOwnSavedQuizDetails(
+      true,
+      false
+    ).maybeSingle();
     data = fallbackResponse.data;
     error = fallbackResponse.error;
+  }
+
+  if (isMissingSavedTemplateColumn(error)) {
+    const fallbackResponse = await selectOwnSavedQuizDetails(
+      false,
+      archiveColumnsAvailable
+    ).maybeSingle();
+    data = fallbackResponse.data;
+    error = fallbackResponse.error;
+
+    if (isMissingArchiveColumn(error)) {
+      const noArchiveFallbackResponse = await selectOwnSavedQuizDetails(
+        false,
+        false
+      ).maybeSingle();
+      data = noArchiveFallbackResponse.data;
+      error = noArchiveFallbackResponse.error;
+    }
   }
 
   if (error) throw error;
@@ -758,6 +838,7 @@ export default function CreateQuiz() {
   function validateQuiz() {
     if (!courseName.trim()) return 'Course name is required.';
     if (!quizTitle.trim()) return 'Quiz title is required.';
+    if (!instructorName.trim()) return 'Instructor name is required.';
     if (!Number.isFinite(Number(passingScore))) return 'Passing score is required.';
     if (Number(passingScore) < 0 || Number(passingScore) > 100) {
       return 'Passing score must be between 0 and 100.';
@@ -766,9 +847,9 @@ export default function CreateQuiz() {
     if (
       !Number.isFinite(Number(quizDurationMinutes)) ||
       Number(quizDurationMinutes) < 1 ||
-      Number(quizDurationMinutes) > 480
+      Number(quizDurationMinutes) > 500
     ) {
-      return 'Countdown time must be between 1 and 480 minutes.';
+      return 'Countdown time must be between 1 and 500 minutes.';
     }
 
     for (let questionIndex = 0; questionIndex < questions.length; questionIndex += 1) {
@@ -945,7 +1026,8 @@ export default function CreateQuiz() {
     setSavingAction(publish ? 'publish' : 'draft');
 
     try {
-      const userId = await getCurrentUserId();
+      const user = await getCurrentUser();
+      const userId = user.id;
 
       const quizPayload = {
         course_name: courseName.trim(),
@@ -1094,7 +1176,8 @@ export default function CreateQuiz() {
     setSavingAction('update');
 
     try {
-      const userId = await getCurrentUserId();
+      const user = await getCurrentUser();
+      const userId = user.id;
 
       const quizPayload = {
         course_name: courseName.trim(),
@@ -1105,8 +1188,25 @@ export default function CreateQuiz() {
         passing_score: Number(passingScore),
         quiz_duration_minutes: Number(quizDurationMinutes),
         is_saved_template: true,
-        owner_user_id: userId,
       };
+
+      if (isSettingsAdminUser(user)) {
+        await updateSavedQuizInLibrary({
+          quizId: editQuizIdFromUrl,
+          quiz: quizPayload,
+          questions: questions.map((question) => ({
+            questionText: question.questionText,
+            questionType: question.questionType,
+            choices: question.choices.map((choice) => ({
+              choiceText: choice.choiceText,
+              isCorrect: choice.isCorrect,
+            })),
+          })),
+        });
+
+        setStatusMessage('Saved quiz updated.');
+        return;
+      }
 
       let { data: updatedQuizTemplate, error: quizError } = await supabase
         .from('quiz_templates')
@@ -1115,7 +1215,7 @@ export default function CreateQuiz() {
         .eq('owner_user_id', userId)
         .eq('is_saved_template', true)
         .select()
-        .single();
+        .maybeSingle();
 
       if (isMissingSavedTemplateColumn(quizError)) {
         const fallbackPayload = { ...quizPayload };
@@ -1128,13 +1228,19 @@ export default function CreateQuiz() {
           .eq('is_active', false)
           .eq('results_saved', false)
           .select()
-          .single();
+          .maybeSingle();
 
         updatedQuizTemplate = fallbackResponse.data;
         quizError = fallbackResponse.error;
       }
 
       if (quizError) throw quizError;
+
+      if (!updatedQuizTemplate) {
+        throw new Error(
+          'You do not have permission to edit this saved quiz, or it no longer exists.'
+        );
+      }
 
       // DATA SAFETY: hard-deletes saved quiz questions before replacing them.
       // Do not apply this pattern to student attempts/results.
@@ -1476,7 +1582,7 @@ export default function CreateQuiz() {
               >
                 {isLoadingActiveQuizzes ? 'Refreshing...' : 'Refresh'}
               </button>
-              {createdQuiz && (
+              {createdQuiz && !createdQuiz.results_saved && (
                 <button
                   type="button"
                   className="quiz-danger-button"
@@ -1643,12 +1749,13 @@ export default function CreateQuiz() {
 
             <div className="form-row four-column-row">
               <div className="form-group">
-                <label htmlFor="instructorName">Instructor Name</label>
+                <label htmlFor="instructorName">Instructor Name *</label>
                 <input
                   id="instructorName"
                   type="text"
                   value={instructorName}
                   onChange={(event) => setInstructorName(event.target.value)}
+                  required
                 />
               </div>
 
@@ -1681,7 +1788,7 @@ export default function CreateQuiz() {
                   id="quizDurationMinutes"
                   type="number"
                   min="1"
-                  max="480"
+                  max="500"
                   step="1"
                   value={quizDurationMinutes}
                   onChange={(event) => setQuizDurationMinutes(event.target.value)}
@@ -2026,7 +2133,7 @@ export default function CreateQuiz() {
             <div className="live-results-actions">
               <Link
                 className="secondary-link-button"
-                to={`/quiz-results-7392?quizId=${createdQuiz.id}`}
+                to={`/quiz-results-7392?quizId=${createdQuiz.id}&from=full-results`}
               >
                 View Full Results
               </Link>

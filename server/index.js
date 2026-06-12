@@ -14,6 +14,7 @@ import { handler as instructorUsersHandler } from '../netlify/functions/instruct
 import { handler as attendanceRecordsHandler } from '../netlify/functions/attendance-records.js';
 import { handler as certificatesSessionHandler } from '../netlify/functions/certificates-session.js';
 import { handler as savedQuizLibraryHandler } from '../netlify/functions/saved-quiz-library.js';
+import { handler as uploadClassPdfHandler } from '../netlify/functions/upload-class-pdf.js';
 import { handler as walletCardsSessionHandler } from '../netlify/functions/wallet-cards-session.js';
 
 const app = express();
@@ -1376,6 +1377,17 @@ app.all('/.netlify/functions/wallet-cards-session', async (request, response) =>
     console.error('Local wallet-cards-session function error:', error);
     response.status(500).json({
       error: error?.message || 'Unable to run wallet cards function locally.',
+    });
+  }
+});
+
+app.all('/.netlify/functions/upload-class-pdf', async (request, response) => {
+  try {
+    await runLocalNetlifyFunction(request, response, uploadClassPdfHandler);
+  } catch (error) {
+    console.error('Local upload-class-pdf function error:', error);
+    response.status(500).json({
+      error: error?.message || 'Unable to run upload class PDF function locally.',
     });
   }
 });

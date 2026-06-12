@@ -4,7 +4,33 @@ import autoTable from 'jspdf-autotable';
 import ExcelJS from 'exceljs';
 import { supabase } from '../supabaseClient';
 
-const SHAREPOINT_ARCHIVE_EMAIL = 'excourse7233@gmail.com';
+const SHAREPOINT_ARCHIVE_EMAILS = new Set([
+  'excourse7233@gmail.com',
+  'exceedsafety@gmail.com',
+]);
+const SETTINGS_ADMIN_EMAIL = 'excourse7233@gmail.com';
+const ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE =
+  'Attendance archive requires database migration before it can be used.';
+
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function isSettingsAdminUser(user) {
+  return normalizeEmail(user?.email) === SETTINGS_ADMIN_EMAIL;
+}
+
+function isMissingArchiveColumn(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return (
+    (error?.code === '42703' || message.includes('column')) &&
+    (message.includes('archived_at') ||
+      message.includes('archived_by') ||
+      message.includes('archive_delete_after') ||
+      message.includes('archive_source'))
+  );
+}
 
 function getAssetAccessFromUser(user) {
   const importedAssets = user?.user_metadata?.imported_assets;
@@ -33,12 +59,20 @@ function getAttendanceRecordsCompanyFromUser(user) {
 }
 
 function filterRecordsByAttendanceAccess(records, user) {
+  if (isSettingsAdminUser(user)) {
+    return records;
+  }
+
   return records.filter(
     (record) => record.training_sessions?.owner_user_id === user?.id
   );
 }
 
 function filterSessionsByAttendanceAccess(sessions, user) {
+  if (isSettingsAdminUser(user)) {
+    return sessions;
+  }
+
   return sessions.filter((session) => session.owner_user_id === user?.id);
 }
 
@@ -204,6 +238,14 @@ function getAttendanceRecordsUrl() {
   return '/.netlify/functions/attendance-records';
 }
 
+function getUploadClassPdfUrl() {
+  if (isLocalHost()) {
+    return 'http://localhost:3001/.netlify/functions/upload-class-pdf';
+  }
+
+  return '/.netlify/functions/upload-class-pdf';
+}
+
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -220,7 +262,7 @@ function blobToBase64(blob) {
 async function uploadPdfToSharePoint(doc, fileName) {
   const pdfBlob = doc.output('blob');
   const pdfBase64 = await blobToBase64(pdfBlob);
-  const response = await fetch('/.netlify/functions/upload-class-pdf', {
+  const response = await fetch(getUploadClassPdfUrl(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fileName, pdfBase64 }),
@@ -502,6 +544,7 @@ function TrainerSignaturePreview({ session, onError }) {
 
 export default function AdminRecords() {
   const [records, setRecords] = useState([]);
+  const [archivedRecords, setArchivedRecords] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [currentUserEmail, setCurrentUserEmail] = useState('');
   const [currentUserId, setCurrentUserId] = useState('');
@@ -513,6 +556,12 @@ export default function AdminRecords() {
   });
   const [status, setStatus] = useState('Loading records...');
   const [deletingId, setDeletingId] = useState(null);
+  const [restoringId, setRestoringId] = useState(null);
+  const [restoringArchivedClassId, setRestoringArchivedClassId] = useState(null);
+  const [archivingAttendanceClassId, setArchivingAttendanceClassId] =
+    useState(null);
+  const [attendanceArchiveColumnsAvailable, setAttendanceArchiveColumnsAvailable] =
+    useState(null);
   const [generatingCertificatesId, setGeneratingCertificatesId] = useState(null);
   const [generatingWalletCardsId, setGeneratingWalletCardsId] = useState(null);
   const [archivingClassId, setArchivingClassId] = useState(null);
@@ -522,13 +571,22 @@ export default function AdminRecords() {
   const [selectedPhotoFileName, setSelectedPhotoFileName] = useState('');
   const [photoModalError, setPhotoModalError] = useState('');
   const [expandedSessionIds, setExpandedSessionIds] = useState(() => new Set());
+  const [openSessionActionsId, setOpenSessionActionsId] = useState('');
 
   const groupedRecords = useMemo(
     () => groupRecordsBySession(records, sessions),
     [records, sessions]
   );
-  const shouldArchiveToSharePoint =
-    currentUserEmail.trim().toLowerCase() === SHAREPOINT_ARCHIVE_EMAIL;
+  const groupedArchivedRecords = useMemo(
+    () => groupRecordsBySession(archivedRecords),
+    [archivedRecords]
+  );
+  const canViewAttendanceArchive = isSettingsAdminUser({
+    email: currentUserEmail,
+  });
+  const shouldArchiveToSharePoint = SHAREPOINT_ARCHIVE_EMAILS.has(
+    normalizeEmail(currentUserEmail)
+  );
   const handleMediaLoadError = useCallback((message) => {
     setPhotoModalError(message);
     setStatus(message);
@@ -562,11 +620,27 @@ export default function AdminRecords() {
     });
   }
 
-  function showLoadedRecords(nextRecords, nextSessions = []) {
+  function toggleSessionActions(sessionId) {
+    setOpenSessionActionsId((currentId) =>
+      currentId === sessionId ? '' : sessionId
+    );
+  }
+
+  function showLoadedRecords(
+    nextRecords,
+    nextSessions = [],
+    nextArchivedRecords = archivedRecords
+  ) {
     setRecords(nextRecords);
     setSessions(nextSessions);
+    setArchivedRecords(nextArchivedRecords);
     setExpandedSessionIds(
-      new Set(groupRecordsBySession(nextRecords, nextSessions).map((group) => group.id))
+      new Set(
+        [
+          ...groupRecordsBySession(nextRecords, nextSessions),
+          ...groupRecordsBySession(nextArchivedRecords),
+        ].map((group) => group.id)
+      )
     );
   }
 
@@ -605,6 +679,7 @@ export default function AdminRecords() {
     const accessToken = sessionData?.session?.access_token;
     const user = sessionData?.session?.user;
     const userEmail = user?.email || '';
+    const userCanViewAttendanceArchive = isSettingsAdminUser(user);
 
     setCurrentUserEmail(userEmail.trim().toLowerCase());
     setCurrentUserId(user?.id || '');
@@ -631,7 +706,14 @@ export default function AdminRecords() {
 
         if (Array.isArray(data?.records)) {
           setCanManageAttendanceRecords(Boolean(data.canManageAttendanceRecords));
-          showLoadedRecords(data.records, data.sessions || []);
+          if (typeof data.archiveColumnsAvailable === 'boolean') {
+            setAttendanceArchiveColumnsAvailable(data.archiveColumnsAvailable);
+          }
+          showLoadedRecords(
+            data.records,
+            data.sessions || [],
+            userCanViewAttendanceArchive ? data.archivedRecords || [] : []
+          );
           setStatus('');
           return;
         }
@@ -652,13 +734,31 @@ export default function AdminRecords() {
       console.warn('Attendance records function unavailable locally, using direct Supabase query.');
     }
 
-    const result = await supabase
-      .from('attendance_records')
-      .select(`
-        *,
-        training_sessions (*)
-      `)
-      .order('signed_at', { ascending: false });
+    const selectAttendanceRecords = (archiveMode) => {
+      let query = supabase
+        .from('attendance_records')
+        .select(`
+          *,
+          training_sessions (*)
+        `)
+        .order('signed_at', { ascending: false });
+
+      if (archiveMode === 'active') {
+        query = query.is('archived_at', null);
+      } else if (archiveMode === 'archived') {
+        query = query.not('archived_at', 'is', null);
+      }
+
+      return query;
+    };
+
+    let archiveColumnsAvailable = true;
+    let result = await selectAttendanceRecords('active');
+
+    if (isMissingArchiveColumn(result.error)) {
+      archiveColumnsAvailable = false;
+      result = await selectAttendanceRecords('all');
+    }
 
     if (result.error) {
       console.error(result.error);
@@ -666,7 +766,25 @@ export default function AdminRecords() {
       return;
     }
 
+    let archivedResult = { data: [], error: null };
+
+    if (archiveColumnsAvailable && userCanViewAttendanceArchive) {
+      archivedResult = await selectAttendanceRecords('archived');
+
+      if (archivedResult.error) {
+        console.error(archivedResult.error);
+        setStatus(archivedResult.error.message);
+        return;
+      }
+    }
+
+    setAttendanceArchiveColumnsAvailable(archiveColumnsAvailable);
+
     const loadedRecords = filterRecordsByAttendanceAccess(result.data || [], user);
+    const loadedArchivedRecords = filterRecordsByAttendanceAccess(
+      userCanViewAttendanceArchive ? archivedResult.data || [] : [],
+      user
+    );
 
     const allSessionsResult = await supabase
       .from('training_sessions')
@@ -680,10 +798,15 @@ export default function AdminRecords() {
       return;
     }
 
+    const activeSessionIds = new Set(
+      loadedRecords
+        .map((record) => record.training_session_id)
+        .filter(Boolean)
+    );
     const loadedSessions = filterSessionsByAttendanceAccess(
       allSessionsResult.data || [],
       user
-    );
+    ).filter((session) => activeSessionIds.has(session.id));
 
     const sessionIds = getUniqueSessionIds(loadedRecords);
     const recordsMissingSessions = loadedRecords.some(
@@ -705,19 +828,20 @@ export default function AdminRecords() {
 
       showLoadedRecords(
         mergeRecordSessions(loadedRecords, sessionsResult.data || []),
-        loadedSessions
+        loadedSessions,
+        mergeRecordSessions(loadedArchivedRecords, sessionsResult.data || [])
       );
       setStatus('');
       return;
     }
 
-    showLoadedRecords(loadedRecords, loadedSessions);
+    showLoadedRecords(loadedRecords, loadedSessions, loadedArchivedRecords);
     setStatus('');
   }
 
   async function deleteRecord(record) {
     const confirmed = window.confirm(
-      `Delete attendance record for ${record.student_name}? This cannot be undone.`
+      `Archive attendance record for ${record.student_name}? It will stay in Attendance Archive for 30 days before it can be permanently deleted.`
     );
 
     if (!confirmed) {
@@ -728,6 +852,11 @@ export default function AdminRecords() {
     setStatus('');
 
     try {
+      if (attendanceArchiveColumnsAvailable === false) {
+        setStatus(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE);
+        return;
+      }
+
       const accessToken = await getAccessToken();
       const response = await fetch(getAttendanceRecordsUrl(), {
         method: 'DELETE',
@@ -743,33 +872,185 @@ export default function AdminRecords() {
         throw new Error(data?.error || 'Failed to delete record.');
       }
 
-      setRecords((currentRecords) =>
-        currentRecords.filter((currentRecord) => currentRecord.id !== record.id)
-      );
+      await loadRecords();
+      setStatus('Attendance record archived.');
+    } catch (error) {
+      console.error(error);
+      if (String(error?.message || '').includes(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE)) {
+        setAttendanceArchiveColumnsAvailable(false);
+        setStatus(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE);
+      } else {
+        setStatus(error.message || 'Failed to archive attendance record.');
+      }
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
-      if (data?.deletedSession && record.training_session_id) {
-        setSessions((currentSessions) =>
-          currentSessions.filter(
-            (currentSession) => currentSession.id !== record.training_session_id
-          )
-        );
-        setExpandedSessionIds((currentIds) => {
-          const nextIds = new Set(currentIds);
-          nextIds.delete(record.training_session_id);
-          return nextIds;
-        });
+  async function restoreArchivedRecord(record) {
+    if (!canViewAttendanceArchive) {
+      setStatus('Only the admin account can restore archived attendance records.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Restore this student/class record? It will return to Attendance Records.'
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setRestoringId(record.id);
+    setStatus('');
+
+    try {
+      const accessToken = await getAccessToken();
+      const response = await fetch(getAttendanceRecordsUrl(), {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ recordId: record.id, action: 'restore' }),
+      });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(data?.error || 'Failed to restore record.');
       }
 
+      await loadRecords();
+      setStatus('Attendance record restored.');
+    } catch (error) {
+      console.error(error);
+      if (String(error?.message || '').includes(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE)) {
+        setAttendanceArchiveColumnsAvailable(false);
+        setStatus(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE);
+      } else {
+        setStatus(error.message || 'Failed to restore attendance record.');
+      }
+    } finally {
+      setRestoringId(null);
+    }
+  }
+
+  async function restoreArchivedClass(group) {
+    if (!canViewAttendanceArchive) {
+      setStatus('Only the admin account can restore archived attendance classes.');
+      return;
+    }
+
+    if (!group?.id || group.id === 'unassigned') {
+      setStatus('This class cannot be restored because it has no training session id.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Restore this entire class? All archived students in this class will return to Attendance Records.'
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setRestoringArchivedClassId(group.id);
+    setStatus('');
+
+    try {
+      const accessToken = await getAccessToken();
+      const response = await fetch(getAttendanceRecordsUrl(), {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ action: 'restore_class', sessionId: group.id }),
+      });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(data?.error || 'Failed to restore class.');
+      }
+
+      await loadRecords();
+      setStatus('Class restored successfully.');
+    } catch (error) {
+      console.error(error);
+      if (String(error?.message || '').includes(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE)) {
+        setAttendanceArchiveColumnsAvailable(false);
+        setStatus(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE);
+      } else {
+        setStatus(error.message || 'Failed to restore attendance class.');
+      }
+    } finally {
+      setRestoringArchivedClassId(null);
+    }
+  }
+
+  async function archiveAttendanceClass(group) {
+    if (!canViewAttendanceArchive) {
+      setStatus('Only the admin account can archive entire attendance classes.');
+      return;
+    }
+
+    if (!group?.id || group.id === 'unassigned') {
+      setStatus('This class cannot be archived because it has no training session id.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Archive this entire class? All students in this class will move to Attendance Archive.'
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setArchivingAttendanceClassId(group.id);
+    setStatus('');
+
+    try {
+      if (attendanceArchiveColumnsAvailable === false) {
+        setStatus(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE);
+        return;
+      }
+
+      const accessToken = await getAccessToken();
+      const requestUrl = getAttendanceRecordsUrl();
+      const requestBody = { action: 'archive_class', sessionId: group.id };
+      const response = await fetch(requestUrl, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(
+          `Archive Class failed (${response.status}) at ${requestUrl} with ${JSON.stringify(
+            requestBody
+          )}: ${data?.error || 'No response body.'}`
+        );
+      }
+
+      await loadRecords();
       setStatus(
-        data?.deletedSession
-          ? 'Last student deleted. The class and uploaded files were deleted too.'
-          : 'Record and uploaded files deleted successfully.'
+        `Attendance class archived. ${data?.archivedCount || 0} student record(s) moved to Attendance Archive.`
       );
     } catch (error) {
       console.error(error);
-      setStatus(error.message || 'Failed to delete record and uploaded files.');
+      if (String(error?.message || '').includes(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE)) {
+        setAttendanceArchiveColumnsAvailable(false);
+        setStatus(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE);
+      } else {
+        setStatus(error.message || 'Failed to archive attendance class.');
+      }
     } finally {
-      setDeletingId(null);
+      setArchivingAttendanceClassId(null);
     }
   }
 
@@ -1083,11 +1364,11 @@ export default function AdminRecords() {
       if (shouldArchiveToSharePoint) {
         try {
           await uploadPdfToSharePoint(doc, fileName);
-          alert('Class PDF archived to SharePoint.');
+          setStatus('Class PDF uploaded to SharePoint.');
         } catch (error) {
           console.error(error);
-          alert('SharePoint upload failed. The PDF will download instead.');
           doc.save(fileName);
+          setStatus('SharePoint upload failed. PDF downloaded locally instead.');
         }
       } else {
         doc.save(fileName);
@@ -1249,6 +1530,27 @@ export default function AdminRecords() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!openSessionActionsId) return undefined;
+
+    function closeSessionActionsOnOutsideClick(event) {
+      if (
+        event.target instanceof Element &&
+        event.target.closest('.session-actions-menu')
+      ) {
+        return;
+      }
+
+      setOpenSessionActionsId('');
+    }
+
+    document.addEventListener('click', closeSessionActionsOnOutsideClick);
+
+    return () => {
+      document.removeEventListener('click', closeSessionActionsOnOutsideClick);
+    };
+  }, [openSessionActionsId]);
+
   return (
     <section className="card">
       <div className="admin-header">
@@ -1301,69 +1603,133 @@ export default function AdminRecords() {
 
                 <div className="session-card-actions">
                   {group.id !== 'unassigned' && (
-                    <>
+                    <div className="session-actions-menu">
                       <button
                         type="button"
-                        className="secondary-button session-action-button"
-                        onClick={() => downloadSessionCertificates(group)}
-                        disabled={
-                          !assetAccess.certificateTemplate ||
-                          group.records.length === 0 ||
-                          generatingCertificatesId === group.id
-                        }
-                        title={
-                          assetAccess.certificateTemplate
-                            ? ''
-                            : 'Certificate downloads were not included for this email.'
-                        }
+                        className="secondary-button session-actions-icon-button"
+                        onClick={() => toggleSessionActions(group.id)}
+                        aria-expanded={openSessionActionsId === group.id}
+                        aria-controls={`session-actions-${group.id}`}
+                        aria-label="Class actions"
+                        title="Class actions"
                       >
-                        {generatingCertificatesId === group.id
-                          ? 'Generating certificates...'
-                          : 'Download Certificates'}
+                        <svg
+                          aria-hidden="true"
+                          viewBox="0 0 24 24"
+                          width="20"
+                          height="20"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <circle cx="12" cy="12" r="1" />
+                          <circle cx="19" cy="12" r="1" />
+                          <circle cx="5" cy="12" r="1" />
+                        </svg>
                       </button>
 
-                      <button
-                        type="button"
-                        className="secondary-button session-action-button"
-                        onClick={() => downloadSessionWalletCards(group)}
-                        disabled={
-                          !assetAccess.walletCards ||
-                          group.records.length === 0 ||
-                          generatingWalletCardsId === group.id
-                        }
-                        title={
-                          assetAccess.walletCards
-                            ? ''
-                            : 'Wallet card downloads were not included for this email.'
-                        }
-                      >
-                        {generatingWalletCardsId === group.id
-                          ? 'Generating wallet cards...'
-                          : 'Download Wallet Cards'}
-                      </button>
+                      {openSessionActionsId === group.id && (
+                        <div
+                          className="session-actions-panel"
+                          id={`session-actions-${group.id}`}
+                        >
+                          <button
+                            type="button"
+                            className="secondary-button session-action-button"
+                            onClick={() => {
+                              setOpenSessionActionsId('');
+                              downloadSessionCertificates(group);
+                            }}
+                            disabled={
+                              !assetAccess.certificateTemplate ||
+                              group.records.length === 0 ||
+                              generatingCertificatesId === group.id
+                            }
+                            title={
+                              assetAccess.certificateTemplate
+                                ? ''
+                                : 'Certificate downloads were not included for this email.'
+                            }
+                          >
+                            {generatingCertificatesId === group.id
+                              ? 'Generating certificates...'
+                              : 'Download Certificates'}
+                          </button>
 
-                      <button
-                        type="button"
-                        className="secondary-button session-action-button archive-class-button"
-                        onClick={() => downloadClassArchivePdf(group)}
-                        disabled={archivingClassId === group.id}
-                      >
-                        {archivingClassId === group.id
-                          ? 'Archiving...'
-                          : 'Archive Class PDF'}
-                      </button>
+                          <button
+                            type="button"
+                            className="secondary-button session-action-button"
+                            onClick={() => {
+                              setOpenSessionActionsId('');
+                              downloadSessionWalletCards(group);
+                            }}
+                            disabled={
+                              !assetAccess.walletCards ||
+                              group.records.length === 0 ||
+                              generatingWalletCardsId === group.id
+                            }
+                            title={
+                              assetAccess.walletCards
+                                ? ''
+                                : 'Wallet card downloads were not included for this email.'
+                            }
+                          >
+                            {generatingWalletCardsId === group.id
+                              ? 'Generating wallet cards...'
+                              : 'Download Wallet Cards'}
+                          </button>
 
-                      <button
-                        type="button"
-                        className="secondary-button session-action-button archive-class-button"
-                        onClick={() => downloadClassArchiveExcel(group)}
-                        disabled={archivingClassExcelId === group.id}
-                      >
-                        {archivingClassExcelId === group.id
-                          ? 'Archiving Excel...'
-                          : 'Archive Class Excel'}
-                      </button>
-                    </>
+                          <button
+                            type="button"
+                            className="secondary-button session-action-button archive-class-button"
+                            onClick={() => {
+                              setOpenSessionActionsId('');
+                              downloadClassArchivePdf(group);
+                            }}
+                            disabled={archivingClassId === group.id}
+                          >
+                            {archivingClassId === group.id
+                              ? 'Archiving...'
+                              : 'Archive Class PDF'}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="secondary-button session-action-button archive-class-button"
+                            onClick={() => {
+                              setOpenSessionActionsId('');
+                              downloadClassArchiveExcel(group);
+                            }}
+                            disabled={archivingClassExcelId === group.id}
+                          >
+                            {archivingClassExcelId === group.id
+                              ? 'Archiving Excel...'
+                              : 'Archive Class Excel'}
+                          </button>
+
+                          {canViewAttendanceArchive && (
+                            <button
+                              type="button"
+                              className="delete-button session-action-button"
+                              onClick={() => {
+                                setOpenSessionActionsId('');
+                                archiveAttendanceClass(group);
+                              }}
+                              disabled={
+                                archivingAttendanceClassId === group.id ||
+                                attendanceArchiveColumnsAvailable === false
+                              }
+                            >
+                              {archivingAttendanceClassId === group.id
+                                ? 'Archiving class...'
+                                : 'Archive Class'}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>
@@ -1508,9 +1874,12 @@ export default function AdminRecords() {
                               type="button"
                               className="delete-button"
                               onClick={() => deleteRecord(record)}
-                              disabled={deletingId === record.id}
+                              disabled={
+                                deletingId === record.id ||
+                                attendanceArchiveColumnsAvailable === false
+                              }
                             >
-                              {deletingId === record.id ? 'Deleting...' : 'Delete'}
+                              {deletingId === record.id ? 'Archiving...' : 'Archive'}
                             </button>
                           ) : (
                             'N/A'
@@ -1527,6 +1896,188 @@ export default function AdminRecords() {
             );
           })}
         </div>
+      )}
+
+      {canViewAttendanceArchive && (
+        <section className="session-records-list">
+          <div className="admin-header attendance-archive-header">
+            <div>
+              <h2>Attendance Archive</h2>
+              <p className="muted">Archived deleted student records remain here for 30 days.</p>
+            </div>
+          </div>
+
+          {attendanceArchiveColumnsAvailable === false ? (
+            <p className="muted">{ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE}</p>
+          ) : groupedArchivedRecords.length === 0 ? (
+            <p className="muted">No archived attendance records.</p>
+          ) : (
+            groupedArchivedRecords.map((group) => {
+              const isExpanded = expandedSessionIds.has(group.id);
+              const classTitle = group.title || getSessionValue(group.session, 'course_name');
+
+              return (
+                <section
+                  className={`session-record-card ${
+                    isExpanded
+                      ? 'session-record-card-expanded'
+                      : 'session-record-card-collapsed'
+                  }`}
+                  key={`archive-${group.id}`}
+                >
+                  <div className="session-record-top-row">
+                    <div className="session-record-title-row">
+                      <button
+                        type="button"
+                        className="secondary-button session-expand-button"
+                        onClick={() => toggleSessionExpanded(group.id)}
+                        aria-expanded={isExpanded}
+                        aria-label={`${isExpanded ? 'Collapse' : 'Expand'} archived ${classTitle}`}
+                      >
+                        <span aria-hidden="true">{isExpanded ? 'v' : '>'}</span>
+                      </button>
+                      <h3>{classTitle}</h3>
+                    </div>
+
+                    <div className="session-card-actions">
+                      <button
+                        type="button"
+                        className="secondary-button session-action-button"
+                        onClick={() => restoreArchivedClass(group)}
+                        disabled={restoringArchivedClassId === group.id}
+                      >
+                        {restoringArchivedClassId === group.id
+                          ? 'Restoring class...'
+                          : 'Restore Class'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {isExpanded && (
+                    <>
+                      <dl className="session-meta">
+                        <div>
+                          <dt>Course Name</dt>
+                          <dd>{getSessionValue(group.session, 'course_name')}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Training Date</dt>
+                          <dd>{getSessionValue(group.session, 'training_date')}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Created At</dt>
+                          <dd>{formatDateTime(group.session?.created_at)}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Trainer</dt>
+                          <dd>{getSessionValue(group.session, 'trainer_name')}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Company</dt>
+                          <dd>{getSessionValue(group.session, 'company_name')}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Location</dt>
+                          <dd>{getSessionValue(group.session, 'training_location')}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Time Started</dt>
+                          <dd>{formatTime(group.session?.time_started)}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Class End Time</dt>
+                          <dd>{formatTime(group.session?.time_stopped)}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Expires At</dt>
+                          <dd>{formatDateTime(group.session?.expires_at)}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Course Outline</dt>
+                          <dd>{group.session?.course_outline || 'Not provided'}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Trainer Signature</dt>
+                          <dd>
+                            <TrainerSignaturePreview
+                              session={group.session}
+                              onError={handleMediaLoadError}
+                            />
+                          </dd>
+                        </div>
+
+                        <div>
+                          <dt>Total Students</dt>
+                          <dd>{group.records.length}</dd>
+                        </div>
+                      </dl>
+
+                      <div className="table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Student Name</th>
+                              <th>Email</th>
+                              <th>Company</th>
+                              <th>Signed Date/Time</th>
+                              <th>Signature</th>
+                              <th>Photo</th>
+                              <th>Action</th>
+                            </tr>
+                          </thead>
+
+                          <tbody>
+                            {group.records.map((record) => (
+                              <tr key={record.id}>
+                                <td>{record.student_name}</td>
+                                <td>{record.student_email}</td>
+                                <td>{record.company || 'N/A'}</td>
+                                <td>{formatDateTime(record.signed_at)}</td>
+                                <td>
+                                  <SignaturePreview
+                                    record={record}
+                                    onError={handleMediaLoadError}
+                                  />
+                                </td>
+                                <td>
+                                  <StudentPhotoThumbnail
+                                    record={record}
+                                    onOpen={openPhotoModal}
+                                    onError={handleMediaLoadError}
+                                  />
+                                </td>
+                                <td>
+                                  <button
+                                    type="button"
+                                    className="secondary-button"
+                                    onClick={() => restoreArchivedRecord(record)}
+                                    disabled={restoringId === record.id}
+                                  >
+                                    {restoringId === record.id ? 'Restoring...' : 'Restore'}
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+                </section>
+              );
+            })
+          )}
+        </section>
       )}
 
       {selectedPhotoUrl && (

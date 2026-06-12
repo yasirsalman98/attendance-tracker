@@ -390,6 +390,11 @@ button:disabled {
   gap: 12px;
 }
 
+.attendance-archive-header {
+  justify-content: center;
+  text-align: center;
+}
+
 .admin-actions {
   display: flex;
   flex-wrap: wrap;
@@ -453,6 +458,42 @@ button:disabled {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.session-actions-menu {
+  position: relative;
+}
+
+.session-actions-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  min-width: 42px;
+  height: 38px;
+  padding: 0;
+  border-radius: 7px;
+}
+
+.session-actions-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(260px, 78vw);
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.18);
+}
+
+.session-actions-panel .session-action-button {
+  width: 100%;
+  justify-content: center;
 }
 
 .session-action-button {

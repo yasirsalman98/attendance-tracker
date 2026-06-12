@@ -5,7 +5,10 @@ import {
   formatDateTime,
   getQuizResultSummary,
 } from '../quizResultsUtils';
-import { canDeleteSavedQuizResults } from '../userFeatureAccess';
+import {
+  canDeleteSavedQuizResults,
+  isSettingsAdminUser,
+} from '../userFeatureAccess';
 import './Quiz.css';
 
 function formatDate(value) {
@@ -46,6 +49,31 @@ function formatQuizLabel(quiz) {
   return `${quiz.course_name || 'Untitled Course'} - ${quiz.quiz_title || 'Untitled Quiz'}${statusLabel}`;
 }
 
+function isMissingArchiveColumn(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return (
+    (error?.code === '42703' || message.includes('column')) &&
+    (message.includes('archived_at') ||
+      message.includes('archived_by') ||
+      message.includes('archive_delete_after') ||
+      message.includes('archive_source'))
+  );
+}
+
+function buildArchivePayload(user) {
+  const archivedAt = new Date();
+  const archiveDeleteAfter = new Date(archivedAt);
+  archiveDeleteAfter.setDate(archiveDeleteAfter.getDate() + 30);
+
+  return {
+    archived_at: archivedAt.toISOString(),
+    archived_by: user.id,
+    archive_delete_after: archiveDeleteAfter.toISOString(),
+    archive_source: 'saved_quiz_results',
+  };
+}
+
 async function getCurrentUser() {
   const { data, error } = await supabase.auth.getUser();
 
@@ -56,12 +84,6 @@ async function getCurrentUser() {
   return data.user;
 }
 
-async function getCurrentUserId() {
-  const user = await getCurrentUser();
-
-  return user.id;
-}
-
 export default function QuizResults() {
   const quizDropdownRef = useRef(null);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -70,8 +92,8 @@ export default function QuizResults() {
   const [quizSearchTerm, setQuizSearchTerm] = useState('');
   const [appliedQuizSearchTerm, setAppliedQuizSearchTerm] = useState('');
   const [isQuizDropdownOpen, setIsQuizDropdownOpen] = useState(false);
-  const [quizToDelete, setQuizToDelete] = useState(null);
-  const [isDeletingQuiz, setIsDeletingQuiz] = useState(false);
+  const [quizToArchive, setQuizToArchive] = useState(null);
+  const [isArchivingQuiz, setIsArchivingQuiz] = useState(false);
   const [attempts, setAttempts] = useState([]);
   const [status, setStatus] = useState('Loading quizzes...');
   const [isLoading, setIsLoading] = useState(false);
@@ -85,6 +107,7 @@ export default function QuizResults() {
   const resultSummary = getQuizResultSummary(selectedQuiz, attempts);
   const mostMissedQuestions = resultSummary.mostMissedQuestions;
   const quizIdFromUrl = searchParams.get('quizId') || '';
+  const cameFromFullResults = searchParams.get('from') === 'full-results';
   const showBackToQuizLink =
     selectedQuiz?.is_active &&
     !selectedQuiz.results_saved &&
@@ -105,11 +128,10 @@ export default function QuizResults() {
   async function loadQuizzes(preferredQuizId = selectedQuizId) {
     setStatus('Loading quizzes...');
 
-    let userId;
+    let user;
 
     try {
-      const user = await getCurrentUser();
-      userId = user.id;
+      user = await getCurrentUser();
       setCanDeleteSavedResults(canDeleteSavedQuizResults(user));
     } catch (error) {
       setQuizzes([]);
@@ -119,7 +141,7 @@ export default function QuizResults() {
       return;
     }
 
-    const selectQuizzes = (includeSavedResults) => {
+    const selectQuizzes = (includeSavedResults, includeArchiveFilter) => {
       let query = supabase
         .from('quiz_templates')
         .select(`
@@ -129,22 +151,44 @@ export default function QuizResults() {
             question_text,
             sort_order
           )
-        `)
-        .eq('owner_user_id', userId);
+        `);
+
+      if (!isSettingsAdminUser(user)) {
+        query = query.eq('owner_user_id', user.id);
+      }
 
       query = includeSavedResults
         ? query.or('is_active.eq.true,results_saved.eq.true')
         : query.eq('is_active', true);
 
+      if (includeArchiveFilter) {
+        query = query.is('archived_at', null);
+      }
+
       return query.order('created_at', { ascending: false });
     };
 
-    let { data, error } = await selectQuizzes(true);
+    let { data, error } = await selectQuizzes(true, true);
 
-    if (error?.message?.includes('results_saved')) {
-      const fallbackResponse = await selectQuizzes(false);
+    if (isMissingArchiveColumn(error)) {
+      const fallbackResponse = await selectQuizzes(true, false);
       data = fallbackResponse.data;
       error = fallbackResponse.error;
+    }
+
+    if (error?.message?.includes('results_saved')) {
+      const fallbackResponse = await selectQuizzes(
+        false,
+        !isMissingArchiveColumn(error)
+      );
+      data = fallbackResponse.data;
+      error = fallbackResponse.error;
+
+      if (isMissingArchiveColumn(error)) {
+        const noArchiveFallbackResponse = await selectQuizzes(false, false);
+        data = noArchiveFallbackResponse.data;
+        error = noArchiveFallbackResponse.error;
+      }
     }
 
     if (error) {
@@ -239,55 +283,72 @@ export default function QuizResults() {
     loadAttempts(quizId);
   }
 
-  function openDeleteQuizPopup(event, quiz) {
+  function openArchiveQuizPopup(event, quiz) {
     event.stopPropagation();
-    setQuizToDelete(quiz);
+    setQuizToArchive(quiz);
   }
 
-  async function deleteQuiz() {
-    // DATA SAFETY: hard-deletes a saved quiz/results template. Prefer archive
-    // behavior for production data and keep this scoped to the owning user.
-    if (!quizToDelete?.id) return;
+  async function archiveQuiz() {
+    if (!quizToArchive?.id) return;
 
-    setIsDeletingQuiz(true);
-    setStatus('');
-
-    let userId;
-
-    try {
-      userId = await getCurrentUserId();
-    } catch (error) {
-      setStatus(error?.message || 'Please sign in again.');
-      setIsDeletingQuiz(false);
+    if (quizToArchive.results_saved !== true) {
+      setStatus('Only saved quiz results can be archived from this page.');
+      setQuizToArchive(null);
       return;
     }
 
-    const { error } = await supabase
+    setIsArchivingQuiz(true);
+    setStatus('');
+
+    let user;
+
+    try {
+      user = await getCurrentUser();
+    } catch (error) {
+      setStatus(error?.message || 'Please sign in again.');
+      setIsArchivingQuiz(false);
+      return;
+    }
+
+    let archiveQuery = supabase
       .from('quiz_templates')
-      .delete()
-      .eq('id', quizToDelete.id)
-      .eq('owner_user_id', userId);
+      .update(buildArchivePayload(user))
+      .eq('id', quizToArchive.id)
+      .eq('results_saved', true)
+      .is('archived_at', null);
+
+    if (!isSettingsAdminUser(user)) {
+      archiveQuery = archiveQuery.eq('owner_user_id', user.id);
+    }
+
+    const { data, error } = await archiveQuery.select('id');
 
     if (error) {
-      console.error('Delete quiz error:', error);
-      setStatus(error.message || 'Unable to delete quiz.');
-      setIsDeletingQuiz(false);
+      console.error('Archive saved result error:', error);
+      setStatus(error.message || 'Unable to archive saved result.');
+      setIsArchivingQuiz(false);
+      return;
+    }
+
+    if (!Array.isArray(data) || data.length === 0) {
+      setStatus('No saved result was archived. Refresh and try again.');
+      setIsArchivingQuiz(false);
       return;
     }
 
     setQuizzes((currentQuizzes) =>
-      currentQuizzes.filter((quiz) => quiz.id !== quizToDelete.id)
+      currentQuizzes.filter((quiz) => quiz.id !== quizToArchive.id)
     );
 
-    if (selectedQuizId === quizToDelete.id) {
+    if (selectedQuizId === quizToArchive.id) {
       setSelectedQuizId('');
       setSearchParams({});
       setAttempts([]);
     }
 
-    setQuizToDelete(null);
-    setIsDeletingQuiz(false);
-    setStatus('Quiz deleted successfully.');
+    setQuizToArchive(null);
+    setIsArchivingQuiz(false);
+    setStatus('Saved result archived.');
   }
 
   function handleQuizSearch(event) {
@@ -318,9 +379,11 @@ export default function QuizResults() {
       <div className="quiz-card quiz-results-card">
         <div className="quiz-results-header">
           <div className="quiz-results-left-actions">
-            <Link to="/quizzes-7392" className="secondary-link-button">
-              Back to Quizzes
-            </Link>
+            {!cameFromFullResults && (
+              <Link to="/quizzes-7392" className="secondary-link-button">
+                Back to Quizzes
+              </Link>
+            )}
           </div>
 
           <div className="quiz-results-title">
@@ -405,8 +468,8 @@ export default function QuizResults() {
                           <button
                             type="button"
                             className="quiz-delete-icon-button"
-                            aria-label={`Delete ${formatQuizLabel(quiz)}`}
-                            onClick={(event) => openDeleteQuizPopup(event, quiz)}
+                            aria-label={`Archive ${formatQuizLabel(quiz)}`}
+                            onClick={(event) => openArchiveQuizPopup(event, quiz)}
                           >
                             <svg
                               aria-hidden="true"
@@ -591,35 +654,35 @@ export default function QuizResults() {
           </>
         )}
 
-        {quizToDelete && (
+        {quizToArchive && (
           <div className="quiz-confirm-overlay" role="presentation">
             <div
               className="quiz-confirm-popup"
               role="dialog"
               aria-modal="true"
-              aria-labelledby="deleteQuizTitle"
+              aria-labelledby="archiveQuizTitle"
             >
-              <h3 id="deleteQuizTitle">Delete Quiz?</h3>
+              <h3 id="archiveQuizTitle">Archive Saved Result?</h3>
               <p>
-                This will permanently delete {formatQuizLabel(quizToDelete)} and
-                all student results for it.
+                This will move {formatQuizLabel(quizToArchive)} to Archived
+                Quizzes for 30 days.
               </p>
               <div className="quiz-confirm-actions">
                 <button
                   type="button"
                   className="secondary-button"
-                  onClick={() => setQuizToDelete(null)}
-                  disabled={isDeletingQuiz}
+                  onClick={() => setQuizToArchive(null)}
+                  disabled={isArchivingQuiz}
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
                   className="quiz-danger-button"
-                  onClick={deleteQuiz}
-                  disabled={isDeletingQuiz}
+                  onClick={archiveQuiz}
+                  disabled={isArchivingQuiz}
                 >
-                  {isDeletingQuiz ? 'Deleting...' : 'Delete'}
+                  {isArchivingQuiz ? 'Archiving...' : 'Archive'}
                 </button>
               </div>
             </div>

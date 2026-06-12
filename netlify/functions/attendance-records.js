@@ -1,5 +1,47 @@
 import { createClient } from '@supabase/supabase-js';
 
+const SETTINGS_ADMIN_EMAIL = 'excourse7233@gmail.com';
+const ATTENDANCE_ARCHIVE_RETENTION_DAYS = 30;
+const ATTENDANCE_ARCHIVE_SOURCE = 'deleted_student';
+const ATTENDANCE_CLASS_ARCHIVE_SOURCE = 'archived_class';
+const ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE =
+  'Attendance archive requires database migration before it can be used.';
+
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function isSettingsAdminUser(user) {
+  return normalizeEmail(user?.email) === SETTINGS_ADMIN_EMAIL;
+}
+
+function isMissingArchiveColumn(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return (
+    (error?.code === '42703' || message.includes('column')) &&
+    (message.includes('archived_at') ||
+      message.includes('archived_by') ||
+      message.includes('archive_delete_after') ||
+      message.includes('archive_source'))
+  );
+}
+
+function buildArchivePayload(user, archiveSource = ATTENDANCE_ARCHIVE_SOURCE) {
+  const archivedAt = new Date();
+  const archiveDeleteAfter = new Date(archivedAt);
+  archiveDeleteAfter.setDate(
+    archiveDeleteAfter.getDate() + ATTENDANCE_ARCHIVE_RETENTION_DAYS
+  );
+
+  return {
+    archived_at: archivedAt.toISOString(),
+    archived_by: user.id,
+    archive_delete_after: archiveDeleteAfter.toISOString(),
+    archive_source: archiveSource,
+  };
+}
+
 function normalizeCompany(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -117,7 +159,7 @@ async function removeStorageFiles(client, bucketName, paths) {
 }
 
 export async function handler(event) {
-  if (!['GET', 'DELETE'].includes(event.httpMethod)) {
+  if (!['GET', 'DELETE', 'PATCH'].includes(event.httpMethod)) {
     return jsonResponse(405, { error: 'Method not allowed.' });
   }
 
@@ -149,6 +191,7 @@ export async function handler(event) {
     return jsonResponse(401, { error: 'Login required.' });
   }
 
+  const isSettingsAdmin = isSettingsAdminUser(userData.user);
   const attendanceRecordsCompany = getAttendanceRecordsCompany(userData.user);
   const normalizedAttendanceRecordsCompany = normalizeCompany(attendanceRecordsCompany);
   const sharedAttendanceOwnerIds = serviceRoleKey
@@ -162,8 +205,6 @@ export async function handler(event) {
   );
 
   if (event.httpMethod === 'DELETE') {
-    // DATA SAFETY: hard-deletes an attendance record, its signature/photo files,
-    // and the parent training session when it becomes empty.
     const body = JSON.parse(event.body || '{}');
     const recordId = String(body.recordId || '').trim();
 
@@ -177,128 +218,273 @@ export async function handler(event) {
       .eq('id', recordId)
       .maybeSingle();
 
+    if (isMissingArchiveColumn(recordError)) {
+      return jsonResponse(409, { error: ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE });
+    }
+
     if (recordError) {
-      console.error('Attendance record delete lookup error:', recordError);
-      return jsonResponse(500, { error: recordError.message || 'Unable to delete record.' });
+      console.error('Attendance record archive lookup error:', recordError);
+      return jsonResponse(500, { error: recordError.message || 'Unable to archive record.' });
     }
 
     if (!record) {
       return jsonResponse(404, { error: 'Attendance record was not found.' });
     }
 
-    const session = record.training_sessions;
     const canManageThisRecord = recordMatchesAttendanceAccess(
       record,
       userData.user,
       sharedAttendanceOwnerIds
     );
 
-    if (!canManageThisRecord) {
-      return jsonResponse(403, { error: 'You do not have access to delete this record.' });
+    if (!isSettingsAdmin && !canManageThisRecord) {
+      return jsonResponse(403, { error: 'You do not have access to archive this record.' });
     }
 
-    const { data: sessionRecordsBeforeDelete, error: sessionRecordsError } =
-      record.training_session_id
-        ? await adminClient
-            .from('attendance_records')
-            .select('id, signature_path, photo_path')
-            .eq('training_session_id', record.training_session_id)
-        : { data: [], error: null };
-
-    if (sessionRecordsError) {
-      console.error('Attendance session records lookup error:', sessionRecordsError);
-      return jsonResponse(500, {
-        error: sessionRecordsError.message || 'Unable to delete record.',
-      });
-    }
-
-    const { error: deleteRecordError } = await adminClient
+    const { data: archivedRows, error: archiveRecordError } = await adminClient
       .from('attendance_records')
-      .delete()
-      .eq('id', record.id);
+      .update(buildArchivePayload(userData.user))
+      .eq('id', record.id)
+      .is('archived_at', null)
+      .select('id');
 
-    if (deleteRecordError) {
-      console.error('Attendance record delete error:', deleteRecordError);
+    if (isMissingArchiveColumn(archiveRecordError)) {
+      return jsonResponse(409, { error: ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE });
+    }
+
+    if (archiveRecordError) {
+      console.error('Attendance record archive error:', archiveRecordError);
       return jsonResponse(500, {
-        error: deleteRecordError.message || 'Unable to delete record.',
+        error: archiveRecordError.message || 'Unable to archive record.',
       });
     }
 
-    await removeStorageFiles(adminClient, 'signatures', [record.signature_path]);
-    await removeStorageFiles(adminClient, 'attendance-photos', [record.photo_path]);
-
-    let deletedSession = false;
-
-    if (record.training_session_id) {
-      const { count, error: countError } = await adminClient
-        .from('attendance_records')
-        .select('id', { count: 'exact', head: true })
-        .eq('training_session_id', record.training_session_id);
-
-      if (countError) {
-        console.error('Attendance record count error:', countError);
-      } else if (count === 0) {
-        const deletedSessionRecords = sessionRecordsBeforeDelete || [];
-
-        await removeStorageFiles(
-          adminClient,
-          'signatures',
-          [
-            session?.trainer_signature_path,
-            ...deletedSessionRecords.map((nextRecord) => nextRecord.signature_path),
-          ]
-        );
-        await removeStorageFiles(
-          adminClient,
-          'attendance-photos',
-          deletedSessionRecords.map((nextRecord) => nextRecord.photo_path)
-        );
-
-        const deleteSessionQuery = adminClient
-          // DATA SAFETY: training session hard delete. Convert this path to
-          // soft-delete/archive before expanding deletion behavior.
-          .from('training_sessions')
-          .delete()
-          .eq('id', record.training_session_id)
-          .eq('owner_user_id', session?.owner_user_id || '');
-
-        const { data: deletedSessions, error: deleteSessionError } =
-          await deleteSessionQuery.select('id');
-
-        if (deleteSessionError) {
-          console.error('Empty training session delete error:', deleteSessionError);
-          return jsonResponse(500, {
-            error: deleteSessionError.message || 'Unable to delete empty class.',
-          });
-        }
-
-        deletedSession = (deletedSessions || []).length > 0;
-      }
+    if (!Array.isArray(archivedRows) || archivedRows.length === 0) {
+      return jsonResponse(404, {
+        error: 'No attendance record was archived. Refresh and try again.',
+      });
     }
 
-    return jsonResponse(200, { success: true, deletedSession });
+    return jsonResponse(200, {
+      success: true,
+      archivedIds: archivedRows.map((row) => row.id),
+    });
   }
 
-  const { data, error } = await adminClient
-    .from('attendance_records')
-    .select(`
-      *,
-      training_sessions (*)
-    `)
-    .order('signed_at', { ascending: false });
+  if (event.httpMethod === 'PATCH') {
+    const body = JSON.parse(event.body || '{}');
+    const recordId = String(body.recordId || '').trim();
+    const sessionId = String(body.sessionId || '').trim();
+    const action = String(body.action || '').trim();
+
+    if (!['restore', 'archive_class', 'restore_class'].includes(action)) {
+      return jsonResponse(400, { error: 'Invalid attendance record action.' });
+    }
+
+    if (!isSettingsAdmin) {
+      return jsonResponse(403, {
+        error: 'Only the admin account can manage archived attendance records.',
+      });
+    }
+
+    if (action === 'archive_class') {
+      if (!sessionId) {
+        return jsonResponse(400, { error: 'Training session id is required.' });
+      }
+
+      const { data: archivedRows, error: archiveClassError } = await adminClient
+        .from('attendance_records')
+        .update(buildArchivePayload(userData.user, ATTENDANCE_CLASS_ARCHIVE_SOURCE))
+        .eq('training_session_id', sessionId)
+        .is('archived_at', null)
+        .select('id');
+
+      if (isMissingArchiveColumn(archiveClassError)) {
+        return jsonResponse(409, { error: ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE });
+      }
+
+      if (archiveClassError) {
+        console.error('Attendance class archive error:', archiveClassError);
+        return jsonResponse(500, {
+          error: archiveClassError.message || 'Unable to archive class.',
+        });
+      }
+
+      if (!Array.isArray(archivedRows) || archivedRows.length === 0) {
+        return jsonResponse(409, { error: 'No active students to archive.' });
+      }
+
+      return jsonResponse(200, {
+        success: true,
+        archivedCount: archivedRows.length,
+        archivedIds: archivedRows.map((row) => row.id),
+      });
+    }
+
+    if (action === 'restore_class') {
+      if (!sessionId) {
+        return jsonResponse(400, { error: 'Training session id is required.' });
+      }
+
+      const { data: restoredRows, error: restoreClassError } = await adminClient
+        .from('attendance_records')
+        .update({
+          archived_at: null,
+          archived_by: null,
+          archive_delete_after: null,
+          archive_source: null,
+        })
+        .eq('training_session_id', sessionId)
+        .not('archived_at', 'is', null)
+        .select('id');
+
+      if (isMissingArchiveColumn(restoreClassError)) {
+        return jsonResponse(409, { error: ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE });
+      }
+
+      if (restoreClassError) {
+        console.error('Attendance class restore error:', restoreClassError);
+        return jsonResponse(500, {
+          error: restoreClassError.message || 'Unable to restore class.',
+        });
+      }
+
+      if (!Array.isArray(restoredRows) || restoredRows.length === 0) {
+        return jsonResponse(409, { error: 'No archived students to restore.' });
+      }
+
+      return jsonResponse(200, {
+        success: true,
+        restoredCount: restoredRows.length,
+        restoredIds: restoredRows.map((row) => row.id),
+      });
+    }
+
+    if (!recordId) {
+      return jsonResponse(400, { error: 'Attendance record id is required.' });
+    }
+
+    const { data: record, error: recordError } = await adminClient
+      .from('attendance_records')
+      .select('*, training_sessions (*)')
+      .eq('id', recordId)
+      .maybeSingle();
+
+    if (isMissingArchiveColumn(recordError)) {
+      return jsonResponse(409, { error: ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE });
+    }
+
+    if (recordError) {
+      console.error('Attendance record restore lookup error:', recordError);
+      return jsonResponse(500, { error: recordError.message || 'Unable to restore record.' });
+    }
+
+    if (!record) {
+      return jsonResponse(404, { error: 'Attendance record was not found.' });
+    }
+
+    const canManageThisRecord = recordMatchesAttendanceAccess(
+      record,
+      userData.user,
+      sharedAttendanceOwnerIds
+    );
+
+    if (!isSettingsAdmin && !canManageThisRecord) {
+      return jsonResponse(403, { error: 'You do not have access to restore this record.' });
+    }
+
+    const { data: restoredRows, error: restoreError } = await adminClient
+      .from('attendance_records')
+      .update({
+        archived_at: null,
+        archived_by: null,
+        archive_delete_after: null,
+        archive_source: null,
+      })
+      .eq('id', record.id)
+      .not('archived_at', 'is', null)
+      .select('id');
+
+    if (isMissingArchiveColumn(restoreError)) {
+      return jsonResponse(409, { error: ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE });
+    }
+
+    if (restoreError) {
+      console.error('Attendance record restore error:', restoreError);
+      return jsonResponse(500, {
+        error: restoreError.message || 'Unable to restore record.',
+      });
+    }
+
+    if (!Array.isArray(restoredRows) || restoredRows.length === 0) {
+      return jsonResponse(404, {
+        error: 'No archived attendance record was restored. Refresh and try again.',
+      });
+    }
+
+    return jsonResponse(200, {
+      success: true,
+      restoredIds: restoredRows.map((row) => row.id),
+    });
+  }
+
+  const selectRecords = (archiveMode) => {
+    let query = adminClient
+      .from('attendance_records')
+      .select(`
+        *,
+        training_sessions (*)
+      `)
+      .order('signed_at', { ascending: false });
+
+    if (archiveMode === 'active') {
+      query = query.is('archived_at', null);
+    } else if (archiveMode === 'archived') {
+      query = query.not('archived_at', 'is', null);
+    }
+
+    return query;
+  };
+
+  let archiveColumnsAvailable = true;
+  let { data, error } = await selectRecords('active');
+
+  if (isMissingArchiveColumn(error)) {
+    archiveColumnsAvailable = false;
+    const fallbackResponse = await selectRecords('all');
+    data = fallbackResponse.data;
+    error = fallbackResponse.error;
+  }
 
   if (error) {
     console.error('Attendance records load error:', error);
     return jsonResponse(500, { error: error.message || 'Unable to load records.' });
   }
 
+  let archivedData = [];
+
+  if (archiveColumnsAvailable) {
+    const archivedResponse = await selectRecords('archived');
+
+    if (archivedResponse.error) {
+      console.error('Archived attendance records load error:', archivedResponse.error);
+      return jsonResponse(500, {
+        error: archivedResponse.error.message || 'Unable to load archived records.',
+      });
+    }
+
+    archivedData = archivedResponse.data || [];
+  }
+
   const ownerRecords = (data || []).filter((record) =>
+    isSettingsAdmin ||
     recordMatchesAttendanceAccess(
-      record,
-      userData.user,
-      sharedAttendanceOwnerIds
-    )
+        record,
+        userData.user,
+        sharedAttendanceOwnerIds
+      )
   );
+  const ownerArchivedRecords = isSettingsAdmin ? archivedData || [] : [];
   const visibleSessionIdsWithRecords = new Set(
     ownerRecords
       .map((record) => record.training_session_id)
@@ -317,11 +503,13 @@ export async function handler(event) {
   }
 
   const ownerSessions = (sessionData || []).filter((session) =>
-    sessionMatchesAttendanceAccess(
-      session,
-      userData.user,
-      sharedAttendanceOwnerIds
-    ) && visibleSessionIdsWithRecords.has(session.id)
+    (isSettingsAdmin ||
+      sessionMatchesAttendanceAccess(
+        session,
+        userData.user,
+        sharedAttendanceOwnerIds
+      )) &&
+    visibleSessionIdsWithRecords.has(session.id)
   );
 
   const sessions = await Promise.all(
@@ -367,15 +555,48 @@ export async function handler(event) {
       };
     })
   );
+  const archivedRecords = await Promise.all(
+    ownerArchivedRecords.map(async (record) => {
+      const session = record.training_sessions;
+      const trainerSignatureUrl =
+        session?.trainer_signature_url ||
+        (await addSignedUrl(
+          adminClient,
+          'signatures',
+          session?.trainer_signature_path
+        ));
+
+      return {
+        ...record,
+        signature_url:
+          record.signature_url ||
+          (await addSignedUrl(adminClient, 'signatures', record.signature_path)),
+        photo_url: await addSignedUrl(
+          adminClient,
+          'attendance-photos',
+          record.photo_path
+        ),
+        training_sessions: session
+          ? {
+              ...session,
+              trainer_signature_url: trainerSignatureUrl,
+            }
+          : session,
+      };
+    })
+  );
 
   return jsonResponse(200, {
     records,
+    archivedRecords,
     sessions,
     totalRecordCount: (data || []).length,
     ownedRecordCount: ownerRecords.length,
+    ownedArchivedRecordCount: ownerArchivedRecords.length,
     totalSessionCount: (sessionData || []).length,
     ownedSessionCount: ownerSessions.length,
     canManageAttendanceRecords: canManageAssignedAttendanceRecords,
+    archiveColumnsAvailable,
     attendanceRecordsCompany,
     email: userData.user.email || '',
   });

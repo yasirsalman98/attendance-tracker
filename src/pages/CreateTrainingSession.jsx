@@ -28,8 +28,6 @@ function getDefaultExpirationValue() {
   return getDateTimeLocalValue(new Date(Date.now() + 2 * 60 * 60 * 1000));
 }
 
-const companyOptions = ['Excourse', 'Bowman'];
-
 function combineDateAndTimeToIso(dateValue, timeValue) {
   if (!dateValue || !timeValue) return null;
 
@@ -75,7 +73,7 @@ export default function CreateTrainingSession() {
   const acceptedTrainerSignatureDataRef = useRef(null);
   const qrCodeRef = useRef(null);
   const [courseName, setCourseName] = useState('');
-  const [companyName, setCompanyName] = useState(companyOptions[0]);
+  const [companyName, setCompanyName] = useState('');
   const [trainingLocation, setTrainingLocation] = useState('');
   const [trainerName, setTrainerName] = useState('');
   const [courseOutline, setCourseOutline] = useState('');
@@ -365,22 +363,6 @@ export default function CreateTrainingSession() {
     link.click();
   }
 
-  function handleCreateAnother() {
-    setCourseName('');
-    setCompanyName('');
-    setTrainingLocation('');
-    setTrainerName('');
-    setCourseOutline('');
-    setTrainingDate(getTodayDateValue());
-    setTimeStarted(getCurrentTimeValue());
-    setClassEndTime('');
-    setExpiresAt(getDefaultExpirationValue());
-    clearTrainerSignature();
-    setCreatedSession(null);
-    setCopied(false);
-    setErrorMessage('');
-  }
-
   return (
     <section className="create-session-page">
       <div className="create-session-card">
@@ -459,17 +441,13 @@ export default function CreateTrainingSession() {
 
             <div className="form-group">
               <label htmlFor="companyName">Company Name</label>
-              <select
+              <input
                 id="companyName"
+                type="text"
                 value={companyName}
                 onChange={(event) => setCompanyName(event.target.value)}
-              >
-                {companyOptions.map((company) => (
-                  <option key={company} value={company}>
-                    {company}
-                  </option>
-                ))}
-              </select>
+                autoComplete="organization"
+              />
             </div>
 
             <div className="form-group">
@@ -658,19 +636,6 @@ export default function CreateTrainingSession() {
               </div>
             </div>
 
-            <div className="action-row">
-              <a className="primary-button link-button" href={studentSignInLink}>
-                Open Student Sign-In Form
-              </a>
-
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={handleCreateAnother}
-              >
-                Create Another Session
-              </button>
-            </div>
           </section>
         )}
       </div>

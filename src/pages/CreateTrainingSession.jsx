@@ -1,10 +1,21 @@
 // src/pages/CreateTrainingSession.jsx
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { QRCodeCanvas } from 'qrcode.react';
 import SignaturePad from 'signature_pad';
 import { supabase } from '../supabaseClient';
+import { isSettingsAdminUser } from '../userFeatureAccess';
 import './CreateTrainingSession.css';
+
+function isMissingArchiveColumn(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return (
+    (error?.code === '42703' || message.includes('column')) &&
+    message.includes('archived_at')
+  );
+}
 
 function getTodayDateValue() {
   const now = new Date();
@@ -53,6 +64,27 @@ function formatDateTime(value) {
   return date.toLocaleString();
 }
 
+function formatDate(value) {
+  if (!value) return 'N/A';
+
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return date.toLocaleDateString();
+}
+
+function isLocalHost() {
+  return ['localhost', '127.0.0.1'].includes(window.location.hostname);
+}
+
+function getAttendanceRecordsUrl() {
+  if (isLocalHost()) {
+    return 'http://localhost:3001/.netlify/functions/attendance-records';
+  }
+
+  return '/.netlify/functions/attendance-records';
+}
+
 function dataUrlToBlob(dataUrl) {
   const [metadata, base64Data] = dataUrl.split(',');
   const mimeMatch = metadata.match(/data:(.*);base64/);
@@ -68,6 +100,8 @@ function dataUrlToBlob(dataUrl) {
 }
 
 export default function CreateTrainingSession() {
+  const { sessionId } = useParams();
+  const navigate = useNavigate();
   const trainerSignatureCanvasRef = useRef(null);
   const trainerSignaturePadRef = useRef(null);
   const acceptedTrainerSignatureDataRef = useRef(null);
@@ -93,12 +127,287 @@ export default function CreateTrainingSession() {
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [liveSessions, setLiveSessions] = useState([]);
+  const [isCheckingLiveSessions, setIsCheckingLiveSessions] = useState(false);
+  const [liveSessionsError, setLiveSessionsError] = useState('');
+  const [liveSessionsMessage, setLiveSessionsMessage] = useState('');
+  const [deletingSessionId, setDeletingSessionId] = useState(null);
+  const [isLoadingExistingSession, setIsLoadingExistingSession] =
+    useState(Boolean(sessionId));
 
   const studentSignInLink = useMemo(() => {
     if (!createdSession?.id) return '';
 
     return `${window.location.origin}/attendance/session/${createdSession.id}`;
   }, [createdSession]);
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadExistingSession() {
+      if (!sessionId) {
+        setIsLoadingExistingSession(false);
+        return;
+      }
+
+      setIsLoadingExistingSession(true);
+      setErrorMessage('');
+
+      try {
+        const { data: userData, error: userError } = await supabase.auth.getUser();
+
+        if (userError || !userData?.user?.id) {
+          throw new Error('Please sign in again to view this session.');
+        }
+
+        const { data, error } = await supabase
+          .from('training_sessions')
+          .select('*')
+          .eq('id', sessionId)
+          .single();
+
+        if (error) {
+          throw new Error(`Unable to load training session: ${error.message}`);
+        }
+
+        const canViewSession =
+          isSettingsAdminUser(userData.user) ||
+          data?.owner_user_id === userData.user.id;
+
+        if (!canViewSession) {
+          throw new Error('You do not have access to this training session.');
+        }
+
+        if (isActive) {
+          setCreatedSession(data);
+        }
+      } catch (error) {
+        console.error('Load training session detail error:', error);
+
+        if (isActive) {
+          setCreatedSession(null);
+          setErrorMessage(error?.message || 'Unable to load this training session.');
+        }
+      } finally {
+        if (isActive) {
+          setIsLoadingExistingSession(false);
+        }
+      }
+    }
+
+    loadExistingSession();
+
+    return () => {
+      isActive = false;
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadLiveSessions() {
+      if (sessionId) {
+        setLiveSessions([]);
+        setLiveSessionsError('');
+        setIsCheckingLiveSessions(false);
+        return;
+      }
+
+      setIsCheckingLiveSessions(true);
+      setLiveSessionsError('');
+      setLiveSessionsMessage('');
+
+      try {
+        const { data: userData, error: userError } = await supabase.auth.getUser();
+
+        if (userError || !userData?.user?.id) {
+          throw new Error('Please sign in again to check for live sessions.');
+        }
+
+        const activeSessionSelect =
+          'id, course_name, training_date, company_name, expires_at, owner_user_id, created_at, archived_at';
+        const fallbackSessionSelect =
+          'id, course_name, training_date, company_name, expires_at, owner_user_id, created_at';
+
+        const createSessionQuery = (selectColumns, includeArchiveFilter) => {
+          let query = supabase
+            .from('training_sessions')
+            .select(selectColumns)
+            .gt('expires_at', new Date().toISOString())
+            .order('training_date', { ascending: false })
+            .order('created_at', { ascending: false });
+
+          if (!isSettingsAdminUser(userData.user)) {
+            query = query.eq('owner_user_id', userData.user.id);
+          }
+
+          if (includeArchiveFilter) {
+            query = query.is('archived_at', null);
+          }
+
+          return query;
+        };
+
+        let sessionsResult = await createSessionQuery(activeSessionSelect, true);
+
+        if (isMissingArchiveColumn(sessionsResult.error)) {
+          sessionsResult = await createSessionQuery(fallbackSessionSelect, false);
+        }
+
+        if (sessionsResult.error) {
+          throw sessionsResult.error;
+        }
+
+        const sessions = sessionsResult.data || [];
+        const sessionIds = sessions.map((session) => session.id).filter(Boolean);
+        const countsBySessionId = new Map();
+
+        if (sessionIds.length > 0) {
+          const createRecordsQuery = (includeArchiveFilter) => {
+            let query = supabase
+              .from('attendance_records')
+              .select('training_session_id')
+              .in('training_session_id', sessionIds);
+
+            if (includeArchiveFilter) {
+              query = query.is('archived_at', null);
+            }
+
+            return query;
+          };
+
+          let recordsResult = await createRecordsQuery(true);
+
+          if (isMissingArchiveColumn(recordsResult.error)) {
+            recordsResult = await createRecordsQuery(false);
+          }
+
+          if (recordsResult.error) {
+            console.error('Load live session attendance counts error:', recordsResult.error);
+          } else {
+            (recordsResult.data || []).forEach((record) => {
+              const recordSessionId = record.training_session_id;
+              countsBySessionId.set(
+                recordSessionId,
+                (countsBySessionId.get(recordSessionId) || 0) + 1
+              );
+            });
+          }
+        }
+
+        if (isActive) {
+          setLiveSessions(
+            sessions.map((session) => ({
+              ...session,
+              signedInCount: countsBySessionId.get(session.id) || 0,
+            }))
+          );
+        }
+      } catch (error) {
+        console.error('Load live sessions error:', error);
+
+        if (isActive) {
+          setLiveSessions([]);
+          setLiveSessionsError(
+            'Unable to check live sessions right now. You can still create a new session.'
+          );
+        }
+      } finally {
+        if (isActive) {
+          setIsCheckingLiveSessions(false);
+        }
+      }
+    }
+
+    loadLiveSessions();
+
+    return () => {
+      isActive = false;
+    };
+  }, [sessionId]);
+
+  async function closeTrainingSession(session) {
+    const { data, error: sessionError } = await supabase.auth.getSession();
+    const accessToken = data?.session?.access_token;
+
+    if (sessionError || !accessToken) {
+      throw new Error('Please sign in again before deleting this session.');
+    }
+
+    const response = await fetch(getAttendanceRecordsUrl(), {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        action: 'close_session',
+        sessionId: session.id,
+      }),
+    });
+    const responseBody = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw new Error(
+        responseBody?.error || 'Unable to delete this session. Please try again.'
+      );
+    }
+  }
+
+  async function handleDeleteLiveSession(session) {
+    if (!session?.id || session.isTemporaryPreview) return;
+
+    const confirmed = window.confirm(
+      `Delete this live session?\n\n${session.course_name || 'Untitled Training Session'}\n\nStudents will no longer be able to sign in with this attendance link. Existing attendance records will not be deleted.`
+    );
+
+    if (!confirmed) return;
+
+    setDeletingSessionId(session.id);
+    setLiveSessionsError('');
+    setLiveSessionsMessage('');
+
+    try {
+      await closeTrainingSession(session);
+      setLiveSessions((currentSessions) =>
+        currentSessions.filter((liveSession) => liveSession.id !== session.id)
+      );
+      setLiveSessionsMessage('Live session deleted. Existing attendance records were kept.');
+    } catch (error) {
+      console.error('Delete live session error:', error);
+      setLiveSessionsError(
+        error?.message || 'Unable to delete this live session. Please try again.'
+      );
+    } finally {
+      setDeletingSessionId(null);
+    }
+  }
+
+  async function handleDeleteCurrentSession() {
+    if (!createdSession?.id) return;
+
+    const confirmed = window.confirm(
+      `Delete this session?\n\n${createdSession.course_name || 'Untitled Training Session'}\n\nStudents will no longer be able to sign in with this attendance link. Existing attendance records will not be deleted.`
+    );
+
+    if (!confirmed) return;
+
+    setDeletingSessionId(createdSession.id);
+    setErrorMessage('');
+
+    try {
+      await closeTrainingSession(createdSession);
+      setCreatedSession(null);
+      navigate('/create-session-7392', { replace: true });
+    } catch (error) {
+      console.error('Delete current session error:', error);
+      setErrorMessage(
+        error?.message || 'Unable to delete this session. Please try again.'
+      );
+    } finally {
+      setDeletingSessionId(null);
+    }
+  }
 
   useEffect(() => {
     if (createdSession) return undefined;
@@ -374,13 +683,93 @@ export default function CreateTrainingSession() {
           </p>
         </div>
 
+        {!createdSession && (
+          <>
+            {isCheckingLiveSessions && (
+              <p className="live-sessions-loading">Checking for live sessions...</p>
+            )}
+
+            {!isCheckingLiveSessions && liveSessions.length > 0 && (
+              <section className="live-sessions-panel" aria-labelledby="live-sessions-title">
+                <div className="live-sessions-heading">
+                  <h2 id="live-sessions-title">Live Sessions</h2>
+                  <p>
+                    You have active sessions available. Select one to continue sharing
+                    the QR code or attendance link.
+                  </p>
+                </div>
+
+                <div className="live-sessions-list">
+                  {liveSessions.map((session) => (
+                    <article className="live-session-item" key={session.id}>
+                      <div className="live-session-card-top">
+                        <div className="live-session-title">
+                          <span>Training</span>
+                          <h3>{session.course_name || 'Untitled Training Session'}</h3>
+                        </div>
+
+                        <div className="live-session-actions">
+                          <Link
+                            className="secondary-button link-button live-session-link"
+                            to={`/create-session-7392/${session.id}`}
+                          >
+                            Continue Session
+                          </Link>
+
+                          <button
+                            className="secondary-button danger-secondary-button live-session-delete-button"
+                            type="button"
+                            onClick={() => handleDeleteLiveSession(session)}
+                            disabled={deletingSessionId === session.id}
+                          >
+                            {deletingSessionId === session.id
+                              ? 'Deleting...'
+                              : 'Delete Session'}
+                          </button>
+                        </div>
+                      </div>
+
+                      <dl>
+                        <div>
+                          <dt>Date</dt>
+                          <dd>{formatDate(session.training_date)}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Company</dt>
+                          <dd>{session.company_name || 'Not provided'}</dd>
+                        </div>
+
+                        <div>
+                          <dt>Students</dt>
+                          <dd>{session.signedInCount}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {!isCheckingLiveSessions && liveSessionsError && (
+              <p className="live-sessions-error">{liveSessionsError}</p>
+            )}
+
+            {!isCheckingLiveSessions && liveSessionsMessage && (
+              <p className="live-sessions-message">{liveSessionsMessage}</p>
+            )}
+          </>
+        )}
+
         {errorMessage && (
           <div className="alert alert-error" role="alert">
             {errorMessage}
           </div>
         )}
 
-        {!createdSession ? (
+        {isLoadingExistingSession ? (
+          <p className="live-sessions-loading">Loading training session...</p>
+        ) : !createdSession ? (
           <form className="create-session-form" onSubmit={handleSubmit}>
             <div className="form-group">
               <label htmlFor="courseName">Course Name *</label>
@@ -533,11 +922,26 @@ export default function CreateTrainingSession() {
         ) : (
           <section className="session-created">
             <div className="alert alert-success">
-              Training session created successfully.
+              {sessionId
+                ? 'Training session loaded.'
+                : 'Training session created successfully.'}
             </div>
 
             <div className="session-summary">
-              <h2>Session Details</h2>
+              <div className="session-summary-header">
+                <h2>Session Details</h2>
+
+                <button
+                  className="secondary-button live-session-delete-button"
+                  type="button"
+                  onClick={handleDeleteCurrentSession}
+                  disabled={deletingSessionId === createdSession.id}
+                >
+                  {deletingSessionId === createdSession.id
+                    ? 'Deleting...'
+                    : 'Delete Session'}
+                </button>
+              </div>
 
               <dl>
                 <div>

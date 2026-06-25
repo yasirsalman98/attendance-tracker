@@ -91,6 +91,12 @@ function isMissingSavedTemplateColumn(error) {
   return String(error?.message || '').toLowerCase().includes('is_saved_template');
 }
 
+function isMissingQuizSessionLinkColumn(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return message.includes('schema cache') && message.includes('training_session_id');
+}
+
 function isMissingArchiveColumn(error) {
   const message = String(error?.message || '').toLowerCase();
 
@@ -101,6 +107,14 @@ function isMissingArchiveColumn(error) {
       message.includes('archive_delete_after') ||
       message.includes('archive_source'))
   );
+}
+
+function getAttendanceRecordsUrl() {
+  if (isLocalHost()) {
+    return 'http://localhost:3001/.netlify/functions/attendance-records';
+  }
+
+  return '/.netlify/functions/attendance-records';
 }
 
 function createChoice(text = '') {
@@ -118,6 +132,19 @@ function createQuestion() {
     questionType: 'single_choice',
     choices: [createChoice(), createChoice()],
   };
+}
+
+function formatAttendanceSessionOption(session) {
+  const parts = [
+    session.course_name || 'Untitled Session',
+    session.training_date ? formatDate(session.training_date) : '',
+    session.company_name || '',
+    typeof session.signedInCount === 'number'
+      ? `${session.signedInCount} student${session.signedInCount === 1 ? '' : 's'}`
+      : '',
+  ].filter(Boolean);
+
+  return parts.join(' - ');
 }
 
 function normalizeQuestionType(questionType) {
@@ -451,6 +478,11 @@ export default function CreateQuiz() {
   const [isLoadingQuizQuestions, setIsLoadingQuizQuestions] = useState(false);
   const [activeQuizzes, setActiveQuizzes] = useState([]);
   const [isLoadingActiveQuizzes, setIsLoadingActiveQuizzes] = useState(false);
+  const [attendanceSessions, setAttendanceSessions] = useState([]);
+  const [selectedAttendanceSessionId, setSelectedAttendanceSessionId] = useState('');
+  const [isLoadingAttendanceSessions, setIsLoadingAttendanceSessions] =
+    useState(false);
+  const [attendanceSessionsError, setAttendanceSessionsError] = useState('');
   const [liveQuizDetails, setLiveQuizDetails] = useState(null);
   const [liveAttempts, setLiveAttempts] = useState([]);
   const [liveResultsError, setLiveResultsError] = useState('');
@@ -466,6 +498,13 @@ export default function CreateQuiz() {
   const quizIdFromUrl = searchParams.get('quizId') || '';
   const editQuizIdFromUrl = searchParams.get('editQuizId') || '';
   const isEditingSavedQuiz = Boolean(editQuizIdFromUrl);
+  const selectedAttendanceSession = useMemo(
+    () =>
+      attendanceSessions.find(
+        (session) => session.id === selectedAttendanceSessionId
+      ) || null,
+    [attendanceSessions, selectedAttendanceSessionId]
+  );
 
   const studentQuizLink = useMemo(() => {
     if (!createdQuiz?.id) return '';
@@ -484,6 +523,143 @@ export default function CreateQuiz() {
     [liveAttempts, liveQuizForResults]
   );
   saveQuizResultsRef.current = saveQuizResults;
+
+  const loadAttendanceSessions = useCallback(async function loadAttendanceSessions() {
+    setIsLoadingAttendanceSessions(true);
+    setAttendanceSessionsError('');
+
+    try {
+      const user = await getCurrentUser();
+      const { data: sessionData, error: sessionError } =
+        await supabase.auth.getSession();
+      const accessToken = sessionData?.session?.access_token;
+
+      if (sessionError || !accessToken) {
+        throw new Error('Please sign in again to load attendance sessions.');
+      }
+
+      try {
+        const response = await fetch(getAttendanceRecordsUrl(), {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        });
+        const contentType = response.headers.get('Content-Type') || '';
+
+        if (response.ok && contentType.includes('application/json')) {
+          const data = await response.json().catch(() => null);
+          const records = data?.records || [];
+          const signedInCounts = new Map();
+
+          records.forEach((record) => {
+            if (!record.training_session_id) return;
+            signedInCounts.set(
+              record.training_session_id,
+              (signedInCounts.get(record.training_session_id) || 0) + 1
+            );
+          });
+
+          setAttendanceSessions(
+            (data?.sessions || []).map((session) => ({
+              ...session,
+              signedInCount: signedInCounts.get(session.id) || 0,
+            }))
+          );
+          return;
+        }
+
+        if (!isLocalHost()) {
+          const data = await response.json().catch(() => null);
+          throw new Error(data?.error || 'Unable to load attendance sessions.');
+        }
+      } catch (error) {
+        if (!isLocalHost()) {
+          throw error;
+        }
+
+        console.warn(
+          'Attendance records function unavailable locally, using direct Supabase query.'
+        );
+      }
+
+      const selectAttendanceRecords = (includeArchiveFilter) => {
+        let query = supabase
+          .from('attendance_records')
+          .select(
+            `
+              training_session_id,
+              training_sessions (
+                id,
+                course_name,
+                training_date,
+                company_name,
+                trainer_name,
+                owner_user_id,
+                expires_at,
+                created_at
+              )
+            `
+          )
+          .order('signed_at', { ascending: false });
+
+        if (includeArchiveFilter) {
+          query = query.is('archived_at', null);
+        }
+
+        return query;
+      };
+
+      let { data, error } = await selectAttendanceRecords(true);
+
+      if (isMissingArchiveColumn(error)) {
+        const fallbackResponse = await selectAttendanceRecords(false);
+        data = fallbackResponse.data;
+        error = fallbackResponse.error;
+      }
+
+      if (error) throw error;
+
+      const sessionsById = new Map();
+
+      (data || []).forEach((record) => {
+        const session = record.training_sessions;
+
+        if (!session?.id) return;
+        if (!isSettingsAdminUser(user) && session.owner_user_id !== user.id) return;
+
+        const current = sessionsById.get(session.id);
+
+        sessionsById.set(session.id, {
+          ...session,
+          signedInCount: (current?.signedInCount || 0) + 1,
+        });
+      });
+
+      setAttendanceSessions(
+        [...sessionsById.values()].sort((left, right) => {
+          const leftDate = left.training_date || '';
+          const rightDate = right.training_date || '';
+          return rightDate.localeCompare(leftDate);
+        })
+      );
+    } catch (error) {
+      console.error('Load attendance sessions error:', error);
+      setAttendanceSessions([]);
+      setAttendanceSessionsError(
+        error?.message || 'Unable to load attendance sessions.'
+      );
+    } finally {
+      setIsLoadingAttendanceSessions(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (createdQuiz || isEditingSavedQuiz) return;
+
+    const timerId = window.setTimeout(loadAttendanceSessions, 0);
+
+    return () => window.clearTimeout(timerId);
+  }, [createdQuiz, isEditingSavedQuiz, loadAttendanceSessions]);
 
   const loadLiveSessionResults = useCallback(
     async function loadLiveSessionResults(quizId = createdQuiz?.id) {
@@ -1022,6 +1198,11 @@ export default function CreateQuiz() {
       return;
     }
 
+    if (publish && !selectedAttendanceSessionId) {
+      setErrorMessage('Please select an attendance session before publishing this quiz.');
+      return;
+    }
+
     setErrorMessage('');
     setSavingAction(publish ? 'publish' : 'draft');
 
@@ -1040,12 +1221,18 @@ export default function CreateQuiz() {
         is_active: publish,
         is_saved_template: !publish,
         owner_user_id: userId,
+        training_session_id: publish ? selectedAttendanceSessionId : null,
       };
 
       let quizTemplate;
       const savePayloadWithoutTemplateFlag = (payload) => {
         const nextPayload = { ...payload };
         delete nextPayload.is_saved_template;
+        return nextPayload;
+      };
+      const savePayloadWithoutSessionLink = (payload) => {
+        const nextPayload = { ...payload };
+        delete nextPayload.training_session_id;
         return nextPayload;
       };
       const shouldUpdateDraft = !publish && savedDraftId;
@@ -1068,6 +1255,20 @@ export default function CreateQuiz() {
             .eq('owner_user_id', userId)
             .eq('is_active', false)
             .eq('results_saved', false)
+            .select()
+            .single();
+
+          updatedQuizTemplate = fallbackResponse.data;
+          quizError = fallbackResponse.error;
+        }
+
+        if (!publish && isMissingQuizSessionLinkColumn(quizError)) {
+          const fallbackResponse = await supabase
+            .from('quiz_templates')
+            .update(savePayloadWithoutSessionLink(quizPayload))
+            .eq('id', savedDraftId)
+            .eq('owner_user_id', userId)
+            .eq('is_saved_template', true)
             .select()
             .single();
 
@@ -1098,6 +1299,17 @@ export default function CreateQuiz() {
           const fallbackResponse = await supabase
             .from('quiz_templates')
             .insert(savePayloadWithoutTemplateFlag(quizPayload))
+            .select()
+            .single();
+
+          insertedQuizTemplate = fallbackResponse.data;
+          quizError = fallbackResponse.error;
+        }
+
+        if (!publish && isMissingQuizSessionLinkColumn(quizError)) {
+          const fallbackResponse = await supabase
+            .from('quiz_templates')
+            .insert(savePayloadWithoutSessionLink(quizPayload))
             .select()
             .single();
 
@@ -1151,7 +1363,11 @@ export default function CreateQuiz() {
       }
     } catch (error) {
       console.error('Create quiz error:', error);
-      setErrorMessage(error?.message || 'Unable to save the quiz.');
+      setErrorMessage(
+        isMissingQuizSessionLinkColumn(error)
+          ? 'Quiz attendance session linking requires the Supabase migration before publishing.'
+          : error?.message || 'Unable to save the quiz.'
+      );
     } finally {
       setSavingAction('');
     }
@@ -1795,6 +2011,74 @@ export default function CreateQuiz() {
                 />
               </div>
             </div>
+
+            {!isEditingSavedQuiz && (
+              <section className="attendance-session-selector">
+                <div className="quiz-section-header">
+                  <div>
+                    <h2>Select Attendance Session *</h2>
+                    <p>
+                      Required. This connects quiz results to the correct attendance sheet.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="attendanceSessionId">Attendance Session</label>
+                  <select
+                    id="attendanceSessionId"
+                    value={selectedAttendanceSessionId}
+                    onChange={(event) =>
+                      setSelectedAttendanceSessionId(event.target.value)
+                    }
+                    disabled={isLoadingAttendanceSessions}
+                  >
+                    <option value="">
+                      {isLoadingAttendanceSessions
+                        ? 'Loading attendance sessions...'
+                        : 'Select an attendance session'}
+                    </option>
+                    {attendanceSessions.map((session) => (
+                      <option key={session.id} value={session.id}>
+                        {formatAttendanceSessionOption(session)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {attendanceSessionsError && (
+                  <p className="form-helper is-error">{attendanceSessionsError}</p>
+                )}
+
+                {selectedAttendanceSession ? (
+                  <dl className="selected-attendance-session">
+                    <div className="selected-attendance-session-wide">
+                      <dt>Connected to</dt>
+                      <dd>
+                        {selectedAttendanceSession.course_name || 'Untitled Session'} -{' '}
+                        {formatDate(selectedAttendanceSession.training_date)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Company</dt>
+                      <dd>{selectedAttendanceSession.company_name || 'Not provided'}</dd>
+                    </div>
+                    <div>
+                      <dt>Instructor</dt>
+                      <dd>{selectedAttendanceSession.trainer_name || 'Not provided'}</dd>
+                    </div>
+                    <div>
+                      <dt>Students Signed In</dt>
+                      <dd>{selectedAttendanceSession.signedInCount || 0}</dd>
+                    </div>
+                  </dl>
+                ) : (
+                  <p className="form-helper">
+                    Publish is disabled until a session is selected.
+                  </p>
+                )}
+              </section>
+            )}
 
             <div className="quiz-builder-section">
               <div className="quiz-section-header">

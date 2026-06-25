@@ -72,6 +72,17 @@ function isMissingSubmissionKeyColumn(error) {
   return message.includes('submission_key') && message.includes('schema cache');
 }
 
+function isMissingQuizSessionLinkColumn(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return (
+    message.includes('schema cache') &&
+    (message.includes('training_session_id') ||
+      message.includes('attendance_record_id') ||
+      message.includes('completed_at'))
+  );
+}
+
 function isMissingForceSubmitColumns(error) {
   const message = String(error?.message || '').toLowerCase();
 
@@ -167,34 +178,47 @@ export default function StudentQuiz() {
       setIsLoading(true);
       setLoadError('');
 
-      const { data, error } = await supabase
-        .from('quiz_templates')
-        .select(`
-          id,
-          course_name,
-          quiz_title,
-          quiz_description,
-          instructor_name,
-          class_date,
-          passing_score,
-          quiz_duration_minutes,
-          is_active,
-          results_saved,
-          created_at,
-          quiz_questions (
+      const selectQuiz = (includeSessionLink) => {
+        const sessionLinkField = includeSessionLink ? 'training_session_id,' : '';
+
+        return supabase
+          .from('quiz_templates')
+          .select(`
             id,
-            question_text,
-            question_type,
-            sort_order,
-            quiz_answer_choices (
+            course_name,
+            quiz_title,
+            quiz_description,
+            instructor_name,
+            class_date,
+            passing_score,
+            quiz_duration_minutes,
+            is_active,
+            results_saved,
+            ${sessionLinkField}
+            created_at,
+            quiz_questions (
               id,
-              choice_text,
-              sort_order
+              question_text,
+              question_type,
+              sort_order,
+              quiz_answer_choices (
+                id,
+                choice_text,
+                sort_order
+              )
             )
-          )
-        `)
-        .eq('id', quizId)
-        .maybeSingle();
+          `)
+          .eq('id', quizId)
+          .maybeSingle();
+      };
+
+      let { data, error } = await selectQuiz(true);
+
+      if (isMissingQuizSessionLinkColumn(error)) {
+        const fallbackResponse = await selectQuiz(false);
+        data = fallbackResponse.data;
+        error = fallbackResponse.error;
+      }
 
       if (!isActive) return;
 
@@ -374,6 +398,9 @@ export default function StudentQuiz() {
           percentage,
           passed,
           submitted_at: submittedAt,
+          completed_at: submittedAt,
+          training_session_id: quiz.training_session_id || null,
+          attendance_record_id: null,
         };
 
         let { data: attempt, error: attemptError } = await supabase
@@ -382,12 +409,23 @@ export default function StudentQuiz() {
           .select()
           .single();
 
-        if (isMissingSubmissionKeyColumn(attemptError)) {
+        if (
+          isMissingSubmissionKeyColumn(attemptError) ||
+          isMissingQuizSessionLinkColumn(attemptError)
+        ) {
           const legacyAttemptPayload = { ...attemptPayload };
-          delete legacyAttemptPayload.submission_key;
+          if (isMissingSubmissionKeyColumn(attemptError)) {
+            delete legacyAttemptPayload.submission_key;
+          }
+
+          if (isMissingQuizSessionLinkColumn(attemptError)) {
+            delete legacyAttemptPayload.completed_at;
+            delete legacyAttemptPayload.training_session_id;
+            delete legacyAttemptPayload.attendance_record_id;
+          }
 
           console.warn(
-            'quiz_attempts.submission_key is missing. Retrying submission without duplicate-key protection.'
+            'quiz_attempts is missing newer optional columns. Retrying submission with a legacy payload.'
           );
 
           const legacyAttemptResponse = await supabase

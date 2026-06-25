@@ -23,6 +23,7 @@
 
 .create-session-header {
   margin-bottom: 28px;
+  text-align: center;
 }
 
 .create-session-header .eyebrow {
@@ -43,7 +44,7 @@
 
 .create-session-header p {
   max-width: 680px;
-  margin: 0;
+  margin: 0 auto;
   color: #52616f;
   line-height: 1.6;
 }
@@ -51,6 +52,148 @@
 .create-session-form {
   display: grid;
   gap: 20px;
+}
+
+.live-sessions-loading,
+.live-sessions-error,
+.live-sessions-message {
+  margin: -8px 0 20px;
+  color: #52616f;
+  font-size: 0.95rem;
+}
+
+.live-sessions-error {
+  color: #854d0e;
+}
+
+.live-sessions-message {
+  color: #036f5e;
+  font-weight: 700;
+}
+
+.live-sessions-panel {
+  display: grid;
+  gap: 16px;
+  margin: -8px 0 28px;
+  padding: 20px;
+  border: 1px solid #dde3ea;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.live-sessions-heading {
+  display: grid;
+  gap: 6px;
+}
+
+.live-sessions-heading h2 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.live-sessions-heading p {
+  margin: 0;
+  color: #52616f;
+  line-height: 1.5;
+}
+
+.live-sessions-list {
+  display: grid;
+  gap: 12px;
+}
+
+.live-session-item {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid #74c69d;
+  border-radius: 10px;
+  background: #d8f3dc;
+}
+
+.live-session-card-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 16px;
+}
+
+.live-session-title {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+
+.live-session-title span {
+  color: #52616f;
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.live-session-item h3 {
+  margin: 0;
+  color: #111827;
+  font-size: 1.22rem;
+  line-height: 1.2;
+}
+
+.live-session-item dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(110px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.live-session-item dl div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(116, 198, 157, 0.55);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.live-session-item dt {
+  color: #52616f;
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.live-session-item dd {
+  margin: 0;
+  color: #17202a;
+  font-weight: 700;
+}
+
+.live-session-link {
+  align-self: start;
+  white-space: nowrap;
+}
+
+.live-session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.secondary-button.live-session-delete-button {
+  border: 1px solid #f2a6a6;
+  background: #f8c7c7;
+  color: #7f1d1d;
+  white-space: nowrap;
+}
+
+.secondary-button.live-session-delete-button:hover:not(:disabled) {
+  background: #f3adad;
+}
+
+.secondary-button.live-session-delete-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
 }
 
 .form-row {
@@ -234,31 +377,54 @@
   background: #f8fafc;
 }
 
+.session-summary-header {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.session-summary-header::before {
+  content: '';
+  width: 132px;
+}
+
 .session-summary h2 {
-  margin: 0 0 18px;
+  margin: 0;
   color: #111827;
+  text-align: center;
 }
 
 .session-summary dl {
   display: grid;
-  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 42px;
   margin: 0;
 }
 
 .session-summary dl div {
   display: grid;
-  grid-template-columns: 160px 1fr;
-  gap: 18px;
+  gap: 6px;
+  justify-items: center;
+  min-width: 0;
+  padding: 2px 0;
+  text-align: center;
 }
 
 .session-summary dt {
   font-weight: 800;
   color: #334155;
+  text-transform: uppercase;
+  font-size: 0.78rem;
 }
 
 .session-summary dd {
   margin: 0;
   color: #111827;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .student-link-box {
@@ -344,7 +510,11 @@
   }
 
   .form-row,
+  .live-session-card-top,
+  .live-session-item dl,
+  .session-summary-header,
   .session-summary dl div,
+  .session-summary dl,
   .copy-row,
   .qr-code-box {
     grid-template-columns: 1fr;
@@ -361,9 +531,15 @@
 
   .primary-button,
   .secondary-button,
+  .live-session-link,
+  .live-session-delete-button,
   .signature-action-row button,
   .copy-row button,
   .qr-code-copy {
     width: 100%;
+  }
+
+  .live-session-actions {
+    justify-content: stretch;
   }
 }

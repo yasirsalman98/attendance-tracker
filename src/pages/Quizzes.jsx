@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import { supabase } from '../supabaseClient';
 import { downloadQuizResultsExcel } from '../quizResultsExcel';
+import { getQuizResultSummary } from '../quizResultsUtils';
 import {
   canDeleteSavedQuizResults,
   canUseSavedQuizLibrary,
@@ -12,6 +15,10 @@ import {
 import './Quiz.css';
 
 const EXCEEDSAFETY_EMAIL = 'exceedsafety@gmail.com';
+const SHAREPOINT_ARCHIVE_EMAILS = new Set([
+  'excourse7233@gmail.com',
+  EXCEEDSAFETY_EMAIL,
+]);
 const ARCHIVE_RETENTION_DAYS = 30;
 const ARCHIVE_SOURCE_LABELS = {
   saved_quiz: 'Saved Quizzes',
@@ -78,6 +85,44 @@ function getSavedQuizLibraryUrl() {
   }
 
   return '/.netlify/functions/saved-quiz-library';
+}
+
+function getUploadClassPdfUrl() {
+  if (isLocalHost()) {
+    return 'http://localhost:3001/.netlify/functions/upload-class-pdf';
+  }
+
+  return '/.netlify/functions/upload-class-pdf';
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      resolve(result.includes(',') ? result.split(',').pop() : result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function uploadPdfToSharePoint(doc, fileName) {
+  const pdfBlob = doc.output('blob');
+  const pdfBase64 = await blobToBase64(pdfBlob);
+  const response = await fetch(getUploadClassPdfUrl(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileName, pdfBase64 }),
+  });
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok || !data?.success) {
+    throw new Error(data?.error || 'SharePoint upload failed.');
+  }
+
+  return data;
 }
 
 async function readFunctionJson(response, fallbackMessage) {
@@ -302,6 +347,144 @@ function getSavedQuizOptionLabel(quiz) {
   }${quiz.is_active ? '' : ` (${getSavedQuizDraftLabel(quiz)})`}`;
 }
 
+function cleanFileName(value, fallback = 'quiz-results') {
+  const cleaned = String(value || fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return cleaned || fallback;
+}
+
+function getQuizArchivePdfFileName(quiz) {
+  const courseName = cleanFileName(quiz?.course_name, 'quiz');
+  const quizTitle = cleanFileName(quiz?.quiz_title, 'results');
+  const classDate = quiz?.class_date || new Date().toISOString().split('T')[0];
+
+  return `${courseName}-${quizTitle}-quiz-results-${classDate}.pdf`;
+}
+
+function buildQuizResultsPdf(quiz, attempts) {
+  const summary = getQuizResultSummary(quiz, attempts);
+  const generatedAt = new Date().toLocaleString();
+  const doc = new jsPDF({
+    orientation: 'landscape',
+    unit: 'pt',
+    format: 'letter',
+  });
+
+  doc.setTextColor('#036f5e');
+  doc.setFontSize(20);
+  doc.setFont(undefined, 'bold');
+  doc.text('Quiz Results Archive', 40, 42);
+
+  doc.setTextColor('#111827');
+  doc.setFontSize(10);
+  doc.setFont(undefined, 'normal');
+  doc.text(`Generated date/time: ${generatedAt}`, 40, 64);
+
+  autoTable(doc, {
+    startY: 84,
+    head: [['Quiz Information', '']],
+    body: [
+      ['Course', quiz.course_name || 'Untitled Course'],
+      ['Quiz', quiz.quiz_title || 'Untitled Quiz'],
+      ['Class Date', formatDate(quiz.class_date)],
+      ['Passing Score', `${quiz.passing_score ?? 0}%`],
+      ['Time Limit', formatDuration(quiz.quiz_duration_minutes || 30)],
+      ['Total Attempts', String(attempts.length)],
+      ['Class Average', `${summary.averagePercentage.toFixed(2)}%`],
+      ['Passed', String(summary.passCount)],
+      ['Failed', String(summary.failCount)],
+    ],
+    theme: 'grid',
+    headStyles: {
+      fillColor: '#036f5e',
+      textColor: '#ffffff',
+      fontStyle: 'bold',
+    },
+    styles: {
+      fontSize: 8,
+      cellPadding: 4,
+      overflow: 'linebreak',
+      valign: 'middle',
+    },
+    columnStyles: {
+      0: { cellWidth: 150, fontStyle: 'bold' },
+      1: { cellWidth: 575 },
+    },
+    margin: { left: 40, right: 40 },
+  });
+
+  autoTable(doc, {
+    startY: doc.lastAutoTable.finalY + 18,
+    head: [[
+      'Student Name',
+      'Email',
+      'Company',
+      'Score',
+      'Percentage',
+      'Passed/Failed',
+      'Submitted Date/Time',
+    ]],
+    body: attempts.map((attempt) => [
+      attempt.student_name || '',
+      attempt.student_email || '',
+      attempt.company || 'N/A',
+      `${attempt.score ?? 0} / ${attempt.total_questions ?? 0}`,
+      `${Number(attempt.percentage || 0).toFixed(2)}%`,
+      attempt.passed ? 'Passed' : 'Failed',
+      formatDateTime(attempt.submitted_at),
+    ]),
+    theme: 'grid',
+    headStyles: {
+      fillColor: '#036f5e',
+      textColor: '#ffffff',
+      fontStyle: 'bold',
+    },
+    styles: {
+      fontSize: 7,
+      cellPadding: 4,
+      overflow: 'linebreak',
+      valign: 'middle',
+    },
+    margin: { left: 40, right: 40 },
+  });
+
+  if (summary.mostMissedQuestions.length > 0) {
+    autoTable(doc, {
+      startY: doc.lastAutoTable.finalY + 18,
+      head: [['Question', 'Correct', 'Missed', 'Miss Percentage']],
+      body: summary.mostMissedQuestions.map((question) => [
+        question.questionText || '',
+        `${question.correctCount} of ${attempts.length} (${question.correctPercentage.toFixed(2)}%)`,
+        `${question.missedCount} of ${attempts.length}`,
+        `${question.missPercentage.toFixed(2)}%`,
+      ]),
+      theme: 'grid',
+      headStyles: {
+        fillColor: '#036f5e',
+        textColor: '#ffffff',
+        fontStyle: 'bold',
+      },
+      styles: {
+        fontSize: 7,
+        cellPadding: 4,
+        overflow: 'linebreak',
+        valign: 'middle',
+      },
+      columnStyles: {
+        0: { cellWidth: 470 },
+      },
+      margin: { left: 40, right: 40 },
+    });
+  }
+
+  return doc;
+}
+
 function isOriginalSavedQuizTemplate(quiz) {
   const quizTitle = (quiz.quiz_title || '').trim();
   const isSavedTemplate =
@@ -407,7 +590,9 @@ export default function Quizzes() {
   const [archiveColumnsAvailable, setArchiveColumnsAvailable] = useState(null);
   const [restoringArchivedQuizId, setRestoringArchivedQuizId] = useState('');
   const [downloadingResultsQuizId, setDownloadingResultsQuizId] = useState('');
+  const [archivingQuizPdfId, setArchivingQuizPdfId] = useState('');
   const [deletingSavedResultQuizId, setDeletingSavedResultQuizId] = useState('');
+  const [openSavedResultActionsId, setOpenSavedResultActionsId] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [userPermissions, setUserPermissions] = useState({
@@ -590,14 +775,36 @@ export default function Quizzes() {
     }
   }, []);
 
-  async function downloadSavedQuizResults(quiz) {
-    setDownloadingResultsQuizId(quiz.id);
-    setErrorMessage('');
-    setStatusMessage('');
+  async function loadFullSavedQuizResults(quiz) {
+    const user = await getCurrentUser();
+    let fullQuizQuery = supabase
+      .from('quiz_templates')
+      .select(`
+        *,
+        quiz_questions (
+          id,
+          question_text,
+          sort_order,
+          quiz_answer_choices (
+            id,
+            choice_text,
+            is_correct,
+            sort_order
+          )
+        )
+      `)
+      .eq('id', quiz.id)
+      .eq('results_saved', true)
+      .is('archived_at', null);
 
-    try {
-      const user = await getCurrentUser();
-      let fullQuizQuery = supabase
+    if (!isSettingsAdminUser(user)) {
+      fullQuizQuery = fullQuizQuery.eq('owner_user_id', user.id);
+    }
+
+    let { data: fullQuiz, error: quizError } = await fullQuizQuery.single();
+
+    if (isMissingArchiveColumn(quizError)) {
+      let fallbackFullQuizQuery = supabase
         .from('quiz_templates')
         .select(`
           *,
@@ -614,73 +821,97 @@ export default function Quizzes() {
           )
         `)
         .eq('id', quiz.id)
-        .eq('results_saved', true)
-        .is('archived_at', null);
+        .eq('results_saved', true);
 
       if (!isSettingsAdminUser(user)) {
-        fullQuizQuery = fullQuizQuery.eq('owner_user_id', user.id);
+        fallbackFullQuizQuery = fallbackFullQuizQuery.eq(
+          'owner_user_id',
+          user.id
+        );
       }
 
-      let { data: fullQuiz, error: quizError } = await fullQuizQuery.single();
+      const fallbackResponse = await fallbackFullQuizQuery.single();
+      fullQuiz = fallbackResponse.data;
+      quizError = fallbackResponse.error;
+      setArchiveColumnsAvailable(false);
+    }
 
-      if (isMissingArchiveColumn(quizError)) {
-        let fallbackFullQuizQuery = supabase
-          .from('quiz_templates')
-          .select(`
-            *,
-            quiz_questions (
-              id,
-              question_text,
-              sort_order,
-              quiz_answer_choices (
-                id,
-                choice_text,
-                is_correct,
-                sort_order
-              )
-            )
-          `)
-          .eq('id', quiz.id)
-          .eq('results_saved', true);
+    if (quizError) throw quizError;
 
-        if (!isSettingsAdminUser(user)) {
-          fallbackFullQuizQuery = fallbackFullQuizQuery.eq(
-            'owner_user_id',
-            user.id
-          );
-        }
+    const { data: attempts, error: attemptsError } = await supabase
+      .from('quiz_attempts')
+      .select(`
+        *,
+        quiz_attempt_answers (
+          id,
+          question_id,
+          selected_choice_ids,
+          is_correct
+        )
+      `)
+      .eq('quiz_template_id', quiz.id)
+      .order('submitted_at', { ascending: false });
 
-        const fallbackResponse = await fallbackFullQuizQuery.single();
-        fullQuiz = fallbackResponse.data;
-        quizError = fallbackResponse.error;
-        setArchiveColumnsAvailable(false);
-      }
+    if (attemptsError) throw attemptsError;
 
-      if (quizError) throw quizError;
+    return { attempts: attempts || [], fullQuiz };
+  }
 
-      const { data: attempts, error: attemptsError } = await supabase
-        .from('quiz_attempts')
-        .select(`
-          *,
-          quiz_attempt_answers (
-            id,
-            question_id,
-            selected_choice_ids,
-            is_correct
-          )
-        `)
-        .eq('quiz_template_id', quiz.id)
-        .order('submitted_at', { ascending: false });
+  async function downloadSavedQuizResults(quiz) {
+    setDownloadingResultsQuizId(quiz.id);
+    setErrorMessage('');
+    setStatusMessage('');
 
-      if (attemptsError) throw attemptsError;
+    try {
+      const { attempts, fullQuiz } = await loadFullSavedQuizResults(quiz);
 
-      await downloadQuizResultsExcel(fullQuiz, attempts || []);
+      await downloadQuizResultsExcel(fullQuiz, attempts);
       setStatusMessage('Quiz results Excel downloaded.');
     } catch (error) {
       console.error('Download quiz results error:', error);
       setErrorMessage(error?.message || 'Unable to download quiz results.');
     } finally {
       setDownloadingResultsQuizId('');
+    }
+  }
+
+  async function archiveQuizResultsPdf(quiz) {
+    setArchivingQuizPdfId(quiz.id);
+    setErrorMessage('');
+    setStatusMessage('');
+
+    try {
+      const user = await getCurrentUser();
+      const { attempts, fullQuiz } = await loadFullSavedQuizResults(quiz);
+      const doc = buildQuizResultsPdf(fullQuiz, attempts);
+      const fileName = getQuizArchivePdfFileName(fullQuiz);
+      const shouldUploadToSharePoint = SHAREPOINT_ARCHIVE_EMAILS.has(
+        normalizeEmail(user.email)
+      ) && !isLocalHost();
+
+      if (!shouldUploadToSharePoint) {
+        doc.save(fileName);
+        setStatusMessage('Quiz PDF downloaded.');
+        return;
+      }
+
+      try {
+        await uploadPdfToSharePoint(doc, fileName);
+        setStatusMessage('Quiz PDF uploaded to SharePoint.');
+      } catch (error) {
+        console.error(error);
+        doc.save(fileName);
+        setErrorMessage(
+          `SharePoint upload failed: ${
+            error?.message || 'Unknown upload error.'
+          } Quiz PDF downloaded locally instead.`
+        );
+      }
+    } catch (error) {
+      console.error('Archive quiz PDF error:', error);
+      setErrorMessage(error?.message || 'Unable to archive quiz PDF.');
+    } finally {
+      setArchivingQuizPdfId('');
     }
   }
 
@@ -755,6 +986,12 @@ export default function Quizzes() {
 
   function openSavedQuizResults(quiz) {
     navigate(`/quiz-results-7392?quizId=${quiz.id}`);
+  }
+
+  function toggleSavedResultActions(quizId) {
+    setOpenSavedResultActionsId((currentId) =>
+      currentId === quizId ? '' : quizId
+    );
   }
 
   function handleSavedResultRowKeyDown(event, quiz) {
@@ -875,6 +1112,27 @@ export default function Quizzes() {
       refreshQuizPage();
     });
   }, [refreshQuizPage]);
+
+  useEffect(() => {
+    if (!openSavedResultActionsId) return undefined;
+
+    function closeSavedResultActionsOnOutsideClick(event) {
+      if (
+        event.target instanceof Element &&
+        event.target.closest('.saved-result-actions-menu')
+      ) {
+        return;
+      }
+
+      setOpenSavedResultActionsId('');
+    }
+
+    document.addEventListener('click', closeSavedResultActionsOnOutsideClick);
+
+    return () => {
+      document.removeEventListener('click', closeSavedResultActionsOnOutsideClick);
+    };
+  }, [openSavedResultActionsId]);
 
   return (
     <section className="quiz-page">
@@ -1005,7 +1263,11 @@ export default function Quizzes() {
             <div className="active-quiz-list">
               {savedResultQuizzes.map((quiz) => (
                 <div
-                  className="active-quiz-row saved-result-row"
+                  className={`active-quiz-row saved-result-row ${
+                    openSavedResultActionsId === quiz.id
+                      ? 'saved-result-row-menu-open'
+                      : ''
+                  }`}
                   key={quiz.id}
                   role="button"
                   tabIndex={0}
@@ -1024,26 +1286,77 @@ export default function Quizzes() {
                     </div>
                   </div>
                   <div className="active-quiz-actions">
-                    <Link
-                      className="secondary-link-button compact-link-button"
-                      to={`/quiz-results-7392?quizId=${quiz.id}`}
+                    <div
+                      className="session-actions-menu saved-result-actions-menu"
                       onClick={(event) => event.stopPropagation()}
                     >
-                      View Results
-                    </Link>
-                    <button
-                      type="button"
-                      className="secondary-button compact-link-button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        downloadSavedQuizResults(quiz);
-                      }}
-                      disabled={downloadingResultsQuizId === quiz.id}
-                    >
-                      {downloadingResultsQuizId === quiz.id
-                        ? 'Downloading...'
-                        : 'Download Results'}
-                    </button>
+                      <button
+                        type="button"
+                        className="secondary-button session-actions-icon-button"
+                        onClick={() => toggleSavedResultActions(quiz.id)}
+                        aria-expanded={openSavedResultActionsId === quiz.id}
+                        aria-controls={`saved-result-actions-${quiz.id}`}
+                        aria-label="Saved quiz result actions"
+                        title="Saved quiz result actions"
+                      >
+                        <svg
+                          aria-hidden="true"
+                          viewBox="0 0 24 24"
+                          width="20"
+                          height="20"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <circle cx="12" cy="12" r="1" />
+                          <circle cx="19" cy="12" r="1" />
+                          <circle cx="5" cy="12" r="1" />
+                        </svg>
+                      </button>
+
+                      {openSavedResultActionsId === quiz.id && (
+                        <div
+                          className="session-actions-panel"
+                          id={`saved-result-actions-${quiz.id}`}
+                        >
+                          <Link
+                            className="secondary-link-button session-action-button"
+                            to={`/quiz-results-7392?quizId=${quiz.id}`}
+                            onClick={() => setOpenSavedResultActionsId('')}
+                          >
+                            View Results
+                          </Link>
+                          <button
+                            type="button"
+                            className="secondary-button session-action-button"
+                            onClick={() => {
+                              setOpenSavedResultActionsId('');
+                              downloadSavedQuizResults(quiz);
+                            }}
+                            disabled={downloadingResultsQuizId === quiz.id}
+                          >
+                            {downloadingResultsQuizId === quiz.id
+                              ? 'Downloading...'
+                              : 'Download Results'}
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button session-action-button archive-class-button"
+                            onClick={() => {
+                              setOpenSavedResultActionsId('');
+                              archiveQuizResultsPdf(quiz);
+                            }}
+                            disabled={archivingQuizPdfId === quiz.id}
+                          >
+                            {archivingQuizPdfId === quiz.id
+                              ? 'Archiving...'
+                              : 'Archive Quiz PDF'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
                     {userPermissions.canDeleteSavedQuizResults && (
                       <button
                         type="button"
@@ -1054,6 +1367,7 @@ export default function Quizzes() {
                         title="Archive saved result"
                         onClick={(event) => {
                           event.stopPropagation();
+                          setOpenSavedResultActionsId('');
                           deleteSavedQuizResult(quiz);
                         }}
                         disabled={

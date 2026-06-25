@@ -16,6 +16,33 @@ function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function normalizeComparableText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function isValidStudentEmail(value) {
+  const email = normalizeEmail(value);
+
+  return (
+    email &&
+    email.includes('@') &&
+    email !== 'none@none.com' &&
+    !email.endsWith('@excourse.local') &&
+    !email.startsWith('unprovided-')
+  );
+}
+
+function isMissingQuizSessionLinkColumn(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return (
+    message.includes('schema cache') &&
+    (message.includes('training_session_id') ||
+      message.includes('attendance_record_id') ||
+      message.includes('completed_at'))
+  );
+}
+
 function isSettingsAdminUser(user) {
   return normalizeEmail(user?.email) === SETTINGS_ADMIN_EMAIL;
 }
@@ -111,6 +138,62 @@ function getUniqueSessionIds(records) {
         .filter(Boolean)
     ),
   ];
+}
+
+function getQuizCompletionMap(records, quizAttempts) {
+  const attemptsByAttendanceRecordId = new Set();
+  const attemptsBySessionAndEmail = new Set();
+  const attemptsBySessionAndName = new Set();
+
+  (quizAttempts || []).forEach((attempt) => {
+    const sessionId = attempt.training_session_id;
+
+    if (attempt.attendance_record_id) {
+      attemptsByAttendanceRecordId.add(attempt.attendance_record_id);
+    }
+
+    if (!sessionId) return;
+
+    const email = normalizeEmail(attempt.student_email);
+    const name = normalizeComparableText(attempt.student_name);
+
+    if (isValidStudentEmail(email)) {
+      attemptsBySessionAndEmail.add(`${sessionId}::${email}`);
+    }
+
+    if (name) {
+      attemptsBySessionAndName.add(`${sessionId}::${name}`);
+    }
+  });
+
+  return new Map(
+    records.map((record) => {
+      const sessionId = record.training_session_id;
+      const email = normalizeEmail(record.student_email);
+      const name = normalizeComparableText(record.student_name);
+
+      // Quiz completion is connected to attendance by the selected session ID.
+      // Match attendance_record_id first, then same-session valid email, then
+      // same-session name. Never match student names across sessions/classes.
+      const completed =
+        attemptsByAttendanceRecordId.has(record.id) ||
+        (sessionId &&
+          isValidStudentEmail(email) &&
+          attemptsBySessionAndEmail.has(`${sessionId}::${email}`)) ||
+        (sessionId && name && attemptsBySessionAndName.has(`${sessionId}::${name}`));
+
+      return [record.id, completed];
+    })
+  );
+}
+
+function applyQuizCompletionToRecords(records, quizAttempts) {
+  const quizCompletionMap = getQuizCompletionMap(records, quizAttempts);
+
+  return records.map((record) => ({
+    ...record,
+    quiz_completed: Boolean(quizCompletionMap.get(record.id)),
+  }));
 }
 
 function mergeRecordSessions(records, sessions) {
@@ -644,6 +727,53 @@ export default function AdminRecords() {
     );
   }
 
+  async function loadLinkedQuizAttemptsForRecords(nextRecords) {
+    const sessionIds = getUniqueSessionIds(nextRecords);
+
+    if (sessionIds.length === 0) return [];
+
+    const selectLinkedQuizAttempts = (includeArchiveField) => {
+      const quizTemplateFields = includeArchiveField
+        ? 'id, archived_at'
+        : 'id';
+
+      return supabase
+        .from('quiz_attempts')
+        .select(`
+          id,
+          student_name,
+          student_email,
+          training_session_id,
+          attendance_record_id,
+          completed_at,
+          submitted_at,
+          quiz_templates (
+            ${quizTemplateFields}
+          )
+        `)
+        .in('training_session_id', sessionIds);
+    };
+
+    let { data, error } = await selectLinkedQuizAttempts(true);
+
+    if (isMissingArchiveColumn(error)) {
+      const fallbackResponse = await selectLinkedQuizAttempts(false);
+      data = fallbackResponse.data;
+      error = fallbackResponse.error;
+    }
+
+    if (isMissingQuizSessionLinkColumn(error)) {
+      return [];
+    }
+
+    if (error) {
+      console.error('Load linked quiz attempts error:', error);
+      return [];
+    }
+
+    return (data || []).filter((attempt) => !attempt.quiz_templates?.archived_at);
+  }
+
   async function downloadSelectedPhoto() {
     if (!selectedPhotoUrl) return;
 
@@ -709,8 +839,12 @@ export default function AdminRecords() {
           if (typeof data.archiveColumnsAvailable === 'boolean') {
             setAttendanceArchiveColumnsAvailable(data.archiveColumnsAvailable);
           }
-          showLoadedRecords(
+          const linkedRecords = applyQuizCompletionToRecords(
             data.records,
+            data.quizAttempts || []
+          );
+          showLoadedRecords(
+            linkedRecords,
             data.sessions || [],
             userCanViewAttendanceArchive ? data.archivedRecords || [] : []
           );
@@ -821,13 +955,22 @@ export default function AdminRecords() {
 
       if (sessionsResult.error) {
         console.error(sessionsResult.error);
-        showLoadedRecords(loadedRecords, loadedSessions);
+        showLoadedRecords(
+          applyQuizCompletionToRecords(
+            loadedRecords,
+            await loadLinkedQuizAttemptsForRecords(loadedRecords)
+          ),
+          loadedSessions
+        );
         setStatus(sessionsResult.error.message);
         return;
       }
 
       showLoadedRecords(
-        mergeRecordSessions(loadedRecords, sessionsResult.data || []),
+        applyQuizCompletionToRecords(
+          mergeRecordSessions(loadedRecords, sessionsResult.data || []),
+          await loadLinkedQuizAttemptsForRecords(loadedRecords)
+        ),
         loadedSessions,
         mergeRecordSessions(loadedArchivedRecords, sessionsResult.data || [])
       );
@@ -835,7 +978,14 @@ export default function AdminRecords() {
       return;
     }
 
-    showLoadedRecords(loadedRecords, loadedSessions, loadedArchivedRecords);
+    showLoadedRecords(
+      applyQuizCompletionToRecords(
+        loadedRecords,
+        await loadLinkedQuizAttemptsForRecords(loadedRecords)
+      ),
+      loadedSessions,
+      loadedArchivedRecords
+    );
     setStatus('');
   }
 
@@ -1231,6 +1381,7 @@ export default function AdminRecords() {
         tableImages.push({ photoImage, signatureImage });
         tableRows.push([
           record.student_name || '',
+          record.quiz_completed ? 'Yes' : 'No',
           record.student_email || '',
           record.company || 'N/A',
           formatDateTime(record.signed_at),
@@ -1289,6 +1440,7 @@ export default function AdminRecords() {
         startY: doc.lastAutoTable.finalY + 18,
         head: [[
           'Student Name',
+          'Quiz Completed',
           'Student Email',
           'Company',
           'Signed Date/Time',
@@ -1318,25 +1470,26 @@ export default function AdminRecords() {
         },
         columnStyles: {
           0: { cellWidth: 55 },
-          1: { cellWidth: 75 },
-          2: { cellWidth: 45 },
-          3: { cellWidth: 65 },
-          4: { cellWidth: 47 },
-          5: { cellWidth: 47 },
-          6: { cellWidth: 45 },
-          7: { cellWidth: 45 },
-          8: { cellWidth: 55 },
-          9: { cellWidth: 45 },
-          10: { cellWidth: 55 },
-          11: { cellWidth: 45 },
-          12: { cellWidth: 88 },
+          1: { cellWidth: 42 },
+          2: { cellWidth: 70 },
+          3: { cellWidth: 43 },
+          4: { cellWidth: 60 },
+          5: { cellWidth: 43 },
+          6: { cellWidth: 43 },
+          7: { cellWidth: 42 },
+          8: { cellWidth: 42 },
+          9: { cellWidth: 52 },
+          10: { cellWidth: 43 },
+          11: { cellWidth: 52 },
+          12: { cellWidth: 43 },
+          13: { cellWidth: 80 },
         },
         didDrawCell: (data) => {
           if (data.section !== 'body') return;
 
           const media = tableImages[data.row.index];
 
-          if (data.column.index === 7 && media?.photoImage) {
+          if (data.column.index === 8 && media?.photoImage) {
             doc.addImage(
               media.photoImage,
               data.cell.x + 6,
@@ -1346,7 +1499,7 @@ export default function AdminRecords() {
             );
           }
 
-          if (data.column.index === 8 && media?.signatureImage) {
+          if (data.column.index === 9 && media?.signatureImage) {
             doc.addImage(
               media.signatureImage,
               data.cell.x + 4,
@@ -1418,6 +1571,7 @@ export default function AdminRecords() {
       const attendanceSheet = workbook.addWorksheet('Attendance Records');
       attendanceSheet.columns = [
         { header: 'Student Name', key: 'studentName', width: 24 },
+        { header: 'Quiz Completed', key: 'quizCompleted', width: 18 },
         { header: 'Student Email', key: 'studentEmail', width: 30 },
         { header: 'Company', key: 'company', width: 24 },
         { header: 'Signed Date/Time', key: 'signedAt', width: 24 },
@@ -1434,7 +1588,7 @@ export default function AdminRecords() {
       attendanceSheet.views = [{ state: 'frozen', ySplit: 1 }];
       attendanceSheet.autoFilter = {
         from: 'A1',
-        to: 'M1',
+        to: 'N1',
       };
       attendanceSheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
       attendanceSheet.getRow(1).fill = {
@@ -1456,6 +1610,7 @@ export default function AdminRecords() {
         );
         const row = attendanceSheet.addRow({
           studentName: record.student_name || '',
+          quizCompleted: record.quiz_completed ? 'Yes' : 'No',
           studentEmail: record.student_email || '',
           company: record.company || 'N/A',
           signedAt: formatDateTime(record.signed_at),
@@ -1478,7 +1633,7 @@ export default function AdminRecords() {
             extension: getImageExtension(photoImage),
           });
           attendanceSheet.addImage(imageId, {
-            tl: { col: 7.15, row: row.number - 0.85 },
+            tl: { col: 8.15, row: row.number - 0.85 },
             ext: { width: 58, height: 58 },
           });
         }
@@ -1489,7 +1644,7 @@ export default function AdminRecords() {
             extension: getImageExtension(signatureImage),
           });
           attendanceSheet.addImage(imageId, {
-            tl: { col: 8.1, row: row.number - 0.78 },
+            tl: { col: 9.1, row: row.number - 0.78 },
             ext: { width: 120, height: 42 },
           });
         }
@@ -1804,10 +1959,26 @@ export default function AdminRecords() {
               </dl>
 
               <div className="table-wrap">
+                <div className="quiz-status-legend" aria-label="Quiz completion legend">
+                  <span>
+                    <span className="quiz-status-icon quiz-completed" aria-hidden="true">
+                      ✓
+                    </span>
+                    Quiz completed
+                  </span>
+                  <span>
+                    <span className="quiz-status-icon quiz-not-completed" aria-hidden="true">
+                      ×
+                    </span>
+                    Quiz not completed
+                  </span>
+                </div>
+
                 <table>
                   <thead>
                     <tr>
                       <th>Student Name</th>
+                      <th>Quiz</th>
                       <th>Email</th>
                       <th>Company</th>
                       <th>Signed Date/Time</th>
@@ -1820,7 +1991,7 @@ export default function AdminRecords() {
                   <tbody>
                     {group.records.length === 0 && (
                       <tr>
-                        <td colSpan="7" className="muted">
+                        <td colSpan="8" className="muted">
                           No students found for this class.
                         </td>
                       </tr>
@@ -1849,6 +2020,27 @@ export default function AdminRecords() {
                               </div>
                             </div>
                           )}
+                        </td>
+                        <td>
+                          <span
+                            className={`quiz-status-icon ${
+                              record.quiz_completed
+                                ? 'quiz-completed'
+                                : 'quiz-not-completed'
+                            }`}
+                            title={
+                              record.quiz_completed
+                                ? 'Quiz completed for this session'
+                                : 'No quiz completion found for this session'
+                            }
+                            aria-label={
+                              record.quiz_completed
+                                ? 'Quiz completed for this session'
+                                : 'No quiz completion found for this session'
+                            }
+                          >
+                            {record.quiz_completed ? '✓' : '×'}
+                          </span>
                         </td>
                         <td>{record.student_email}</td>
                         <td>{record.company || 'N/A'}</td>

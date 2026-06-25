@@ -91,7 +91,11 @@ function AppShell() {
   const [session, setSession] = useState(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const isProtectedPage = useMemo(
-    () => protectedPaths.some((path) => location.pathname === path),
+    () =>
+      protectedPaths.some(
+        (path) =>
+          location.pathname === path || location.pathname.startsWith(`${path}/`)
+      ),
     [location.pathname]
   );
 
@@ -187,6 +191,14 @@ function AppShell() {
           />
           <Route
             path="/create-session-7392"
+            element={
+              <ProtectedRoute session={session} isAuthLoading={isAuthLoading}>
+                <CreateTrainingSession />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/create-session-7392/:sessionId"
             element={
               <ProtectedRoute session={session} isAuthLoading={isAuthLoading}>
                 <CreateTrainingSession />

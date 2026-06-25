@@ -154,6 +154,7 @@
 }
 
 .form-group input,
+.form-group select,
 .form-group textarea,
 .quiz-form > label input,
 .quiz-form > label textarea {
@@ -184,6 +185,23 @@
   cursor: not-allowed;
 }
 
+.quiz-page .delete-button {
+  background: #fecaca;
+  color: #7f1d1d;
+}
+
+.quiz-page .delete-button:hover,
+.quiz-page .delete-button:focus-visible {
+  background: #fca5a5;
+  color: #7f1d1d;
+}
+
+.quiz-page .delete-button:disabled,
+.quiz-page .delete-button:disabled:hover {
+  background: #e5e7eb;
+  color: #6b7280;
+}
+
 .quiz-builder-section,
 .results-section {
   display: grid;
@@ -197,6 +215,88 @@
   border: 1px solid #dde3ea;
   border-radius: 10px;
   background: #f8fafc;
+}
+
+.attendance-session-selector {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  background: #f0fdf4;
+  justify-items: center;
+  text-align: center;
+}
+
+.attendance-session-selector .quiz-section-header {
+  justify-content: center;
+  margin-bottom: 0;
+}
+
+.attendance-session-selector .form-group {
+  width: min(100%, 620px);
+  justify-items: center;
+}
+
+.attendance-session-selector select {
+  text-align: center;
+  text-align-last: center;
+}
+
+.attendance-session-selector h2 {
+  margin: 0 0 6px;
+  color: #111827;
+  font-size: 1.25rem;
+}
+
+.attendance-session-selector p {
+  margin: 0;
+  color: #52616f;
+  line-height: 1.5;
+}
+
+.form-helper {
+  margin: 0;
+  color: #52616f;
+  font-size: 0.92rem;
+}
+
+.form-helper.is-error {
+  color: #991b1b;
+  font-weight: 700;
+}
+
+.selected-attendance-session {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: min(100%, 620px);
+  margin: 0;
+}
+
+.selected-attendance-session div {
+  padding: 12px;
+  border: 1px solid #9ed9b2;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.selected-attendance-session-wide {
+  grid-column: 1 / -1;
+}
+
+.selected-attendance-session dt {
+  color: #52616f;
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.selected-attendance-session dd {
+  margin: 4px 0 0;
+  color: #111827;
+  font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .load-quiz-panel h2 {
@@ -348,6 +448,31 @@
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.saved-results-panel .saved-result-row {
+  position: relative;
+  z-index: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+}
+
+.saved-results-panel .saved-result-row-menu-open {
+  z-index: 40;
+}
+
+.saved-results-panel .active-quiz-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.saved-results-panel .saved-result-actions-menu {
+  justify-self: end;
+}
+
+.saved-results-panel .saved-result-actions-menu .session-actions-panel {
+  z-index: 50;
 }
 
 .quiz-page .quiz-save-results-button {
@@ -1356,22 +1481,29 @@
   color: #111827;
 }
 
-.quiz-page .quiz-delete-icon-button {
+.quiz-page button.quiz-delete-icon-button {
   width: 38px;
   min-height: 38px;
   align-self: center;
   display: inline-grid;
   place-items: center;
   padding: 0;
-  border: 1px solid #fecaca;
+  border: 1px solid #f87171;
   border-radius: 6px;
-  background: transparent;
-  color: #dc2626;
+  background: #fecaca;
+  color: #991b1b;
 }
 
-.quiz-page .quiz-delete-icon-button:hover {
-  background: #fee2e2;
-  color: #991b1b;
+.quiz-page button.quiz-delete-icon-button:hover {
+  background: #fca5a5;
+  color: #7f1d1d;
+}
+
+.quiz-page button.quiz-delete-icon-button:disabled,
+.quiz-page button.quiz-delete-icon-button:disabled:hover {
+  border-color: #e5e7eb;
+  background: #e5e7eb;
+  color: #6b7280;
 }
 
 .quiz-dropdown-empty {
@@ -1509,6 +1641,7 @@ select {
     .settings-add-email-grid,
     .settings-user-row,
     .load-quiz-row,
+    .selected-attendance-session,
     .saved-quiz-edit-row,
     .saved-quiz-delete-row,
     .live-status-heading,
@@ -1564,6 +1697,15 @@ select {
     justify-self: stretch;
   }
 
+  .saved-results-panel .active-quiz-actions {
+    justify-content: flex-end;
+    justify-self: end;
+  }
+
+  .saved-results-panel .session-actions-icon-button {
+    width: 42px;
+  }
+
   .qr-code-image,
   .qr-code-copy {
     justify-self: center;
@@ -1572,6 +1714,10 @@ select {
   .secondary-link-button,
   .quiz-page button {
     width: 100%;
+  }
+
+  .saved-results-panel .session-actions-icon-button {
+    width: 42px;
   }
 
   .settings-user-actions {

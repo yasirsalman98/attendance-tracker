@@ -38,6 +38,9 @@ alter table public.quiz_templates
 add column if not exists finalizing boolean not null default false;
 
 alter table public.quiz_templates
+add column if not exists training_session_id uuid references public.training_sessions(id) on delete set null;
+
+alter table public.quiz_templates
 drop constraint if exists quiz_templates_duration_check;
 
 alter table public.quiz_templates
@@ -49,6 +52,9 @@ create index if not exists quiz_templates_owner_user_id_idx
 
 create index if not exists quiz_templates_saved_template_idx
   on public.quiz_templates (owner_user_id, is_saved_template, created_at desc);
+
+create index if not exists quiz_templates_training_session_id_idx
+  on public.quiz_templates (training_session_id);
 
 update public.quiz_templates
 set owner_user_id = (
@@ -105,6 +111,15 @@ create table if not exists public.quiz_attempts (
 alter table public.quiz_attempts
 add column if not exists submission_key text;
 
+alter table public.quiz_attempts
+add column if not exists training_session_id uuid references public.training_sessions(id) on delete set null;
+
+alter table public.quiz_attempts
+add column if not exists attendance_record_id uuid references public.attendance_records(id) on delete set null;
+
+alter table public.quiz_attempts
+add column if not exists completed_at timestamptz;
+
 create table if not exists public.quiz_attempt_answers (
   id uuid primary key default gen_random_uuid(),
   quiz_attempt_id uuid not null references public.quiz_attempts(id) on delete cascade,
@@ -122,6 +137,12 @@ create index if not exists quiz_answer_choices_question_id_sort_idx
 
 create index if not exists quiz_attempts_template_id_submitted_idx
   on public.quiz_attempts (quiz_template_id, submitted_at desc);
+
+create index if not exists quiz_attempts_training_session_id_idx
+  on public.quiz_attempts (training_session_id);
+
+create index if not exists quiz_attempts_attendance_record_id_idx
+  on public.quiz_attempts (attendance_record_id);
 
 create unique index if not exists quiz_attempts_template_submission_key_idx
   on public.quiz_attempts (quiz_template_id, submission_key)

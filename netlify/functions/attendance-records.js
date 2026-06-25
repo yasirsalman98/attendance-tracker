@@ -27,6 +27,17 @@ function isMissingArchiveColumn(error) {
   );
 }
 
+function isMissingQuizSessionLinkColumn(error) {
+  const message = String(error?.message || '').toLowerCase();
+
+  return (
+    message.includes('schema cache') &&
+    (message.includes('training_session_id') ||
+      message.includes('attendance_record_id') ||
+      message.includes('completed_at'))
+  );
+}
+
 function buildArchivePayload(user, archiveSource = ATTENDANCE_ARCHIVE_SOURCE) {
   const archivedAt = new Date();
   const archiveDeleteAfter = new Date(archivedAt);
@@ -39,6 +50,15 @@ function buildArchivePayload(user, archiveSource = ATTENDANCE_ARCHIVE_SOURCE) {
     archived_by: user.id,
     archive_delete_after: archiveDeleteAfter.toISOString(),
     archive_source: archiveSource,
+  };
+}
+
+function buildCloseSessionPayload() {
+  const closedAt = new Date().toISOString();
+
+  return {
+    archived_at: closedAt,
+    expires_at: closedAt,
   };
 }
 
@@ -277,8 +297,73 @@ export async function handler(event) {
     const sessionId = String(body.sessionId || '').trim();
     const action = String(body.action || '').trim();
 
-    if (!['restore', 'archive_class', 'restore_class'].includes(action)) {
+    if (!['restore', 'archive_class', 'restore_class', 'close_session'].includes(action)) {
       return jsonResponse(400, { error: 'Invalid attendance record action.' });
+    }
+
+    if (action === 'close_session') {
+      if (!sessionId) {
+        return jsonResponse(400, { error: 'Training session id is required.' });
+      }
+
+      const { data: session, error: sessionError } = await adminClient
+        .from('training_sessions')
+        .select('*')
+        .eq('id', sessionId)
+        .maybeSingle();
+
+      if (sessionError) {
+        console.error('Training session close lookup error:', sessionError);
+        return jsonResponse(500, {
+          error: sessionError.message || 'Unable to find training session.',
+        });
+      }
+
+      if (!session) {
+        return jsonResponse(404, { error: 'Training session was not found.' });
+      }
+
+      const canManageThisSession = sessionMatchesAttendanceAccess(
+        session,
+        userData.user,
+        sharedAttendanceOwnerIds
+      );
+
+      if (!isSettingsAdmin && !canManageThisSession) {
+        return jsonResponse(403, {
+          error: 'You do not have access to delete this training session.',
+        });
+      }
+
+      let closeResult = await adminClient
+        .from('training_sessions')
+        .update(buildCloseSessionPayload())
+        .eq('id', sessionId)
+        .select('id');
+
+      if (isMissingArchiveColumn(closeResult.error)) {
+        const closedAt = new Date().toISOString();
+        closeResult = await adminClient
+          .from('training_sessions')
+          .update({ expires_at: closedAt })
+          .eq('id', sessionId)
+          .select('id');
+      }
+
+      if (closeResult.error) {
+        console.error('Training session close error:', closeResult.error);
+        return jsonResponse(500, {
+          error: closeResult.error.message || 'Unable to delete training session.',
+        });
+      }
+
+      if (!Array.isArray(closeResult.data) || closeResult.data.length === 0) {
+        return jsonResponse(404, {
+          error: 'No session was deleted. Refresh the page and try again.',
+        });
+      }
+
+      return jsonResponse(200, { success: true, closedSessionId: sessionId });
     }
 
     if (!isSettingsAdmin) {
@@ -585,11 +670,63 @@ export async function handler(event) {
       };
     })
   );
+  const visibleSessionIds = [
+    ...new Set(records.map((record) => record.training_session_id).filter(Boolean)),
+  ];
+  let quizAttempts = [];
+
+  if (visibleSessionIds.length > 0) {
+    const selectLinkedQuizAttempts = (includeArchiveField) => {
+      const quizTemplateFields = includeArchiveField
+        ? 'id, owner_user_id, training_session_id, archived_at'
+        : 'id, owner_user_id, training_session_id';
+
+      return adminClient
+        .from('quiz_attempts')
+        .select(`
+          id,
+          student_name,
+          student_email,
+          training_session_id,
+          attendance_record_id,
+          completed_at,
+          submitted_at,
+          quiz_templates (
+            ${quizTemplateFields}
+          )
+        `)
+        .in('training_session_id', visibleSessionIds);
+    };
+
+    let attemptsResponse = await selectLinkedQuizAttempts(true);
+
+    if (isMissingArchiveColumn(attemptsResponse.error)) {
+      attemptsResponse = await selectLinkedQuizAttempts(false);
+    }
+
+    if (isMissingQuizSessionLinkColumn(attemptsResponse.error)) {
+      quizAttempts = [];
+    } else if (attemptsResponse.error) {
+      console.error('Linked quiz attempts load error:', attemptsResponse.error);
+    } else {
+      quizAttempts = (attemptsResponse.data || []).filter((attempt) => {
+        const quizOwnerId = attempt.quiz_templates?.owner_user_id;
+
+        return (
+          !attempt.quiz_templates?.archived_at &&
+          (isSettingsAdmin ||
+            quizOwnerId === userData.user.id ||
+            sharedAttendanceOwnerIds.has(quizOwnerId))
+        );
+      });
+    }
+  }
 
   return jsonResponse(200, {
     records,
     archivedRecords,
     sessions,
+    quizAttempts,
     totalRecordCount: (data || []).length,
     ownedRecordCount: ownerRecords.length,
     ownedArchivedRecordCount: ownerArchivedRecords.length,

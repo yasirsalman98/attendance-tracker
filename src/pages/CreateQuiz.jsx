@@ -1198,11 +1198,6 @@ export default function CreateQuiz() {
       return;
     }
 
-    if (publish && !selectedAttendanceSessionId) {
-      setErrorMessage('Please select an attendance session before publishing this quiz.');
-      return;
-    }
-
     setErrorMessage('');
     setSavingAction(publish ? 'publish' : 'draft');
 
@@ -1221,7 +1216,9 @@ export default function CreateQuiz() {
         is_active: publish,
         is_saved_template: !publish,
         owner_user_id: userId,
-        training_session_id: publish ? selectedAttendanceSessionId : null,
+        ...(publish && selectedAttendanceSessionId
+          ? { training_session_id: selectedAttendanceSessionId }
+          : {}),
       };
 
       let quizTemplate;
@@ -2016,9 +2013,9 @@ export default function CreateQuiz() {
               <section className="attendance-session-selector">
                 <div className="quiz-section-header">
                   <div>
-                    <h2>Select Attendance Session *</h2>
+                    <h2>Select Attendance Session (Optional)</h2>
                     <p>
-                      Required. This connects quiz results to the correct attendance sheet.
+                      Choose a session to connect quiz results to an attendance sheet.
                     </p>
                   </div>
                 </div>
@@ -2036,7 +2033,7 @@ export default function CreateQuiz() {
                     <option value="">
                       {isLoadingAttendanceSessions
                         ? 'Loading attendance sessions...'
-                        : 'Select an attendance session'}
+                        : 'No attendance session'}
                     </option>
                     {attendanceSessions.map((session) => (
                       <option key={session.id} value={session.id}>
@@ -2074,7 +2071,7 @@ export default function CreateQuiz() {
                   </dl>
                 ) : (
                   <p className="form-helper">
-                    Publish is disabled until a session is selected.
+                    You can publish without connecting an attendance session.
                   </p>
                 )}
               </section>

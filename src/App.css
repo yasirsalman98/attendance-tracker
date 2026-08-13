@@ -499,6 +499,12 @@ button:disabled {
   white-space: nowrap;
 }
 
+.archive-overdue {
+  color: #991b1b;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
 .session-actions-menu {
   position: relative;
 }

@@ -6,8 +6,8 @@ const ATTENDANCE_ARCHIVE_SOURCE = 'deleted_student';
 const ATTENDANCE_CLASS_ARCHIVE_SOURCE = 'archived_class';
 const ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE =
   'Attendance archive requires database migration before it can be used.';
-const RECORDS_PAGE_SIZE = 5;
-const RESPONSE_VERSION = 'attendance-lazy-v2';
+const RECORDS_PAGE_SIZE = 10;
+const RESPONSE_VERSION = 'attendance-archive-v3';
 const SESSION_SUMMARY_FIELDS = `
   id,
   course_name,
@@ -36,11 +36,19 @@ function isMissingArchiveColumn(error) {
   const message = String(error?.message || '').toLowerCase();
 
   return (
+    error?.code === 'PGRST202' ||
+    message.includes('archive_attendance_class') ||
+    message.includes('restore_attendance_class') ||
+    message.includes('restore_attendance_student') ||
+    message.includes('get_attendance_student_archives') ||
+    message.includes('get_attendance_class_archives') ||
     (error?.code === '42703' || message.includes('column')) &&
     (message.includes('archived_at') ||
       message.includes('archived_by') ||
       message.includes('archive_delete_after') ||
-      message.includes('archive_source'))
+      message.includes('archive_source') ||
+      message.includes('archive_type') ||
+      message.includes('attendance_archive'))
   );
 }
 
@@ -67,6 +75,8 @@ function buildArchivePayload(user, archiveSource = ATTENDANCE_ARCHIVE_SOURCE) {
     archived_by: user.id,
     archive_delete_after: archiveDeleteAfter.toISOString(),
     archive_source: archiveSource,
+    archive_type:
+      archiveSource === ATTENDANCE_CLASS_ARCHIVE_SOURCE ? 'class' : 'student',
   };
 }
 
@@ -397,12 +407,25 @@ export async function handler(event) {
         return jsonResponse(400, { error: 'Training session id is required.' });
       }
 
-      const { data: archivedRows, error: archiveClassError } = await adminClient
-        .from('attendance_records')
-        .update(buildArchivePayload(userData.user, ATTENDANCE_CLASS_ARCHIVE_SOURCE))
-        .eq('training_session_id', sessionId)
-        .is('archived_at', null)
-        .select('id');
+      const sessionResponse = await adminClient
+        .from('training_sessions')
+        .select('id, owner_user_id')
+        .eq('id', sessionId)
+        .maybeSingle();
+
+      if (sessionResponse.error) {
+        return jsonResponse(500, { error: 'Unable to find training session.' });
+      }
+
+      if (!sessionResponse.data) {
+        return jsonResponse(404, { error: 'Training session was not found.' });
+      }
+
+      const { data: archiveResult, error: archiveClassError } = await adminClient
+        .rpc('archive_attendance_class', {
+          p_session_id: sessionId,
+          p_archived_by: userData.user.id,
+        });
 
       if (isMissingArchiveColumn(archiveClassError)) {
         return jsonResponse(409, { error: ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE });
@@ -415,14 +438,13 @@ export async function handler(event) {
         });
       }
 
-      if (!Array.isArray(archivedRows) || archivedRows.length === 0) {
-        return jsonResponse(409, { error: 'No active students to archive.' });
-      }
+      const result = archiveResult?.[0] || {};
 
       return jsonResponse(200, {
         success: true,
-        archivedCount: archivedRows.length,
-        archivedIds: archivedRows.map((row) => row.id),
+        archivedCount: Number(result.archived_count) || 0,
+        archivedAt: result.archived_at || null,
+        deleteAfter: result.delete_after || null,
       });
     }
 
@@ -431,17 +453,8 @@ export async function handler(event) {
         return jsonResponse(400, { error: 'Training session id is required.' });
       }
 
-      const { data: restoredRows, error: restoreClassError } = await adminClient
-        .from('attendance_records')
-        .update({
-          archived_at: null,
-          archived_by: null,
-          archive_delete_after: null,
-          archive_source: null,
-        })
-        .eq('training_session_id', sessionId)
-        .not('archived_at', 'is', null)
-        .select('id');
+      const { data: restoredCount, error: restoreClassError } = await adminClient
+        .rpc('restore_attendance_class', { p_session_id: sessionId });
 
       if (isMissingArchiveColumn(restoreClassError)) {
         return jsonResponse(409, { error: ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE });
@@ -454,14 +467,13 @@ export async function handler(event) {
         });
       }
 
-      if (!Array.isArray(restoredRows) || restoredRows.length === 0) {
-        return jsonResponse(409, { error: 'No archived students to restore.' });
+      if (!Number.isFinite(Number(restoredCount)) || Number(restoredCount) < 0) {
+        return jsonResponse(409, { error: 'No archived class was restored.' });
       }
 
       return jsonResponse(200, {
         success: true,
-        restoredCount: restoredRows.length,
-        restoredIds: restoredRows.map((row) => row.id),
+        restoredCount: Number(restoredCount),
       });
     }
 
@@ -498,17 +510,8 @@ export async function handler(event) {
       return jsonResponse(403, { error: 'You do not have access to restore this record.' });
     }
 
-    const { data: restoredRows, error: restoreError } = await adminClient
-      .from('attendance_records')
-      .update({
-        archived_at: null,
-        archived_by: null,
-        archive_delete_after: null,
-        archive_source: null,
-      })
-      .eq('id', record.id)
-      .not('archived_at', 'is', null)
-      .select('id');
+    const { data: restored, error: restoreError } = await adminClient
+      .rpc('restore_attendance_student', { p_record_id: record.id });
 
     if (isMissingArchiveColumn(restoreError)) {
       return jsonResponse(409, { error: ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE });
@@ -521,15 +524,15 @@ export async function handler(event) {
       });
     }
 
-    if (!Array.isArray(restoredRows) || restoredRows.length === 0) {
+    if (restored !== true) {
       return jsonResponse(404, {
-        error: 'No archived attendance record was restored. Refresh and try again.',
+        error: 'No student archive was restored. Refresh and try again.',
       });
     }
 
     return jsonResponse(200, {
       success: true,
-      restoredIds: restoredRows.map((row) => row.id),
+      restoredIds: [record.id],
     });
   }
 
@@ -615,6 +618,7 @@ export async function handler(event) {
 
   if (view === 'students') {
     const sessionId = String(query.sessionId || '').trim();
+    const requestedArchiveType = String(query.archiveType || '').trim();
 
     if (!sessionId) {
       return jsonResponse(400, { error: 'Training session id is required.' });
@@ -664,6 +668,9 @@ export async function handler(event) {
     recordsQuery = archiveMode
       ? recordsQuery.not('archived_at', 'is', null)
       : recordsQuery.is('archived_at', null);
+    if (archiveMode && requestedArchiveType === 'class') {
+      recordsQuery = recordsQuery.eq('archive_type', 'class');
+    }
 
     let recordsResponse = await recordsQuery;
 
@@ -882,14 +889,47 @@ export async function handler(event) {
     };
   };
 
-  const archiveColumnsAvailable = true;
+  const selectArchiveSummaries = async (archiveType, page) => {
+    const from = (page - 1) * RECORDS_PAGE_SIZE;
+    const functionName = archiveType === 'student'
+      ? 'get_attendance_student_archives'
+      : 'get_attendance_class_archives';
+    const response = await adminClient.rpc(functionName, {
+      p_owner_ids: isSettingsAdmin ? null : accessibleOwnerIds,
+      p_offset: from,
+      p_limit: RECORDS_PAGE_SIZE,
+    });
+
+    if (response.error) return response;
+
+    const data = (response.data || []).map((row) => ({
+      ...row.summary,
+      ...(archiveType === 'class'
+        ? { student_count: Number(row.student_count) || 0 }
+        : {}),
+    }));
+    const count = Number(response.data?.[0]?.total_count) || 0;
+
+    return {
+      data,
+      count,
+      hasMore: from + data.length < count,
+      error: null,
+      source: 'rpc',
+    };
+  };
+
+  let archiveColumnsAvailable = true;
   const emptySummaryResponse = { data: [], count: 0, hasMore: false, error: null };
-  const [activeResponse, archivedResponse] = await Promise.all([
+  const [activeResponse, studentArchiveResponse, classArchiveResponse] = await Promise.all([
     scope !== 'archived'
       ? selectSessionSummaries('active', requestedPage)
       : Promise.resolve(emptySummaryResponse),
     scope !== 'active' && isSettingsAdmin && archiveColumnsAvailable
-      ? selectSessionSummaries('archived', requestedArchivePage)
+      ? selectArchiveSummaries('student', requestedArchivePage)
+      : Promise.resolve(emptySummaryResponse),
+    scope !== 'active' && isSettingsAdmin && archiveColumnsAvailable
+      ? selectArchiveSummaries('class', requestedArchivePage)
       : Promise.resolve(emptySummaryResponse),
   ]);
 
@@ -900,25 +940,41 @@ export async function handler(event) {
     });
   }
 
-  if (archivedResponse.error) {
-    console.error('Archived attendance class summaries load error:', archivedResponse.error);
-    return jsonResponse(500, {
-      error: 'Unable to load archived records.',
-    });
+  const archiveError = studentArchiveResponse.error || classArchiveResponse.error;
+  if (archiveError) {
+    if (isMissingArchiveColumn(archiveError)) {
+      archiveColumnsAvailable = false;
+      studentArchiveResponse.data = [];
+      studentArchiveResponse.count = 0;
+      studentArchiveResponse.hasMore = false;
+      classArchiveResponse.data = [];
+      classArchiveResponse.count = 0;
+      classArchiveResponse.hasMore = false;
+    } else {
+      console.error('Attendance archive summaries load error:', archiveError);
+      return jsonResponse(500, { error: 'Unable to load archived records.' });
+    }
   }
 
   return jsonResponse(200, {
     records: [],
     archivedRecords: [],
     sessions: activeResponse.data || [],
-    archivedSessions: archivedResponse.data || [],
+    archivedSessions: classArchiveResponse.data || [],
+    studentArchives: studentArchiveResponse.data || [],
+    classArchives: classArchiveResponse.data || [],
     page: requestedPage,
     archivePage: requestedArchivePage,
     pageSize: RECORDS_PAGE_SIZE,
     hasMoreRecords: Boolean(activeResponse.hasMore),
-    hasMoreArchivedRecords: Boolean(archivedResponse.hasMore),
+    hasMoreArchivedRecords: Boolean(
+      studentArchiveResponse.hasMore || classArchiveResponse.hasMore
+    ),
+    hasMoreStudentArchives: Boolean(studentArchiveResponse.hasMore),
+    hasMoreClassArchives: Boolean(classArchiveResponse.hasMore),
     totalClassCount: activeResponse.count || 0,
-    totalArchivedClassCount: archivedResponse.count || 0,
+    totalArchivedStudentCount: studentArchiveResponse.count || 0,
+    totalArchivedClassCount: classArchiveResponse.count || 0,
     canManageAttendanceRecords: canManageAssignedAttendanceRecords,
     archiveColumnsAvailable,
     attendanceRecordsCompany,
@@ -926,7 +982,8 @@ export async function handler(event) {
     responseVersion: RESPONSE_VERSION,
     summarySource: {
       active: activeResponse.source || null,
-      archived: archivedResponse.source || null,
+      archivedStudents: studentArchiveResponse.source || null,
+      archivedClasses: classArchiveResponse.source || null,
     },
   });
 }

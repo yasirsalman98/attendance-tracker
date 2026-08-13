@@ -10,3 +10,6 @@
     "server/templates/cards/4.png",
     "server/templates/cards/fonts/*.ttf"
   ]
+
+[functions."attendance-archive-cleanup"]
+  schedule = "@daily"

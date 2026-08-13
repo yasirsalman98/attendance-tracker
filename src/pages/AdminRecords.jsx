@@ -95,6 +95,10 @@ function getSessionValue(session, key) {
   return session?.[key] || 'N/A';
 }
 
+function isArchiveDeadlineOverdue(value) {
+  return Boolean(value && new Date(value).getTime() <= Date.now());
+}
+
 function getStudentCount(session, records = []) {
   const count = Number(session?.student_count);
   return Number.isFinite(count) ? count : records.length;
@@ -556,6 +560,7 @@ function TrainerSignaturePreview({
 export default function AdminRecords() {
   const [records, setRecords] = useState([]);
   const [archivedRecords, setArchivedRecords] = useState([]);
+  const [studentArchives, setStudentArchives] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [archivedSessions, setArchivedSessions] = useState([]);
   const [currentUserEmail, setCurrentUserEmail] = useState('');
@@ -763,6 +768,7 @@ export default function AdminRecords() {
           sessionId,
           archived: String(archived),
         });
+        if (archived) query.set('archiveType', 'class');
         const response = await fetchWithTimeout(
           `${getAttendanceRecordsUrl()}?${query}`,
           { headers: { Authorization: `Bearer ${accessToken}` } },
@@ -770,7 +776,7 @@ export default function AdminRecords() {
         );
         const data = await response.json().catch(() => null);
 
-        if (response.ok && data?.responseVersion !== 'attendance-lazy-v2') {
+        if (response.ok && data?.responseVersion !== 'attendance-archive-v3') {
           throw new Error('The optimized attendance endpoint is not deployed.');
         }
 
@@ -888,6 +894,7 @@ export default function AdminRecords() {
       setPhotoModalError('');
       setRecords([]);
       setArchivedRecords([]);
+      setStudentArchives([]);
       setSessions([]);
       setArchivedSessions([]);
       setRecordsPage(1);
@@ -947,7 +954,7 @@ export default function AdminRecords() {
       );
       const data = await response.json().catch(() => null);
 
-      if (response.ok && data?.responseVersion !== 'attendance-lazy-v2') {
+      if (response.ok && data?.responseVersion !== 'attendance-archive-v3') {
         throw new Error(
           'The optimized attendance endpoint is not deployed. Deploy the latest function and refresh.'
         );
@@ -962,7 +969,7 @@ export default function AdminRecords() {
 
       const returnedSummaries = [
         ...data.sessions,
-        ...(data.archivedSessions || []),
+        ...(data.classArchives || data.archivedSessions || []),
       ];
 
       if (
@@ -993,9 +1000,13 @@ export default function AdminRecords() {
       }
 
       if (scope !== 'active') {
-        const nextArchivedSessions = data.archivedSessions || [];
+        const nextArchivedSessions = data.classArchives || data.archivedSessions || [];
         setArchivedSessions((current) =>
           append ? [...current, ...nextArchivedSessions] : nextArchivedSessions
+        );
+        const nextStudentArchives = data.studentArchives || [];
+        setStudentArchives((current) =>
+          append ? [...current, ...nextStudentArchives] : nextStudentArchives
         );
         setArchivePage(nextArchivePage);
         setHasMoreArchivedRecords(Boolean(data.hasMoreArchivedRecords));
@@ -1078,7 +1089,7 @@ export default function AdminRecords() {
     }
 
     const confirmed = window.confirm(
-      'Restore this student/class record? It will return to Attendance Records.'
+      `Restore ${record.student_name || 'this student'}? Only this student attendance record will return to Attendance Records.`
     );
 
     if (!confirmed) {
@@ -1105,7 +1116,7 @@ export default function AdminRecords() {
       }
 
       await loadRecords();
-      setStatus('Attendance record restored.');
+      setStatus('Student attendance record restored.');
     } catch (error) {
       console.error(error);
       if (String(error?.message || '').includes(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE)) {
@@ -1184,7 +1195,7 @@ export default function AdminRecords() {
     }
 
     const confirmed = window.confirm(
-      'Archive this entire class? All students in this class will move to Attendance Archive.'
+      'Archive this entire class and every student? Unless restored, the class and its class-owned data will be permanently deleted after 30 days.'
     );
 
     if (!confirmed) {
@@ -2205,14 +2216,48 @@ export default function AdminRecords() {
           <div className="admin-header attendance-archive-header">
             <div>
               <h2>Attendance Archive</h2>
-              <p className="muted">Archived deleted student records remain here for 30 days.</p>
+              <p className="muted">
+                Archived students and classes remain here for 30 days before permanent deletion.
+              </p>
             </div>
           </div>
+
+          <h3>Archived Students</h3>
+          {attendanceArchiveColumnsAvailable !== false && studentArchives.length === 0 && (
+            <p className="muted">No archived students.</p>
+          )}
+          {attendanceArchiveColumnsAvailable !== false && studentArchives.map((record) => (
+            <section className="session-record-card session-record-card-collapsed" key={`student-archive-${record.id}`}>
+              <div className="session-record-top-row">
+                <div>
+                  <h3>{record.student_name || 'Unnamed student'}</h3>
+                  <p className="muted">Class: {record.class_name || 'N/A'}</p>
+                </div>
+                <div className="session-card-actions">
+                  <span>Archived: {formatDateTime(record.archived_at)}</span>
+                  <span>Deletes permanently: {formatDateTime(record.archive_delete_after)}</span>
+                  {isArchiveDeadlineOverdue(record.archive_delete_after) && (
+                    <strong className="archive-overdue">Overdue for cleanup</strong>
+                  )}
+                  <button
+                    type="button"
+                    className="secondary-button session-action-button"
+                    onClick={() => restoreArchivedRecord(record)}
+                    disabled={restoringId === record.id}
+                  >
+                    {restoringId === record.id ? 'Restoring student...' : 'Restore Student'}
+                  </button>
+                </div>
+              </div>
+            </section>
+          ))}
+
+          <h3>Archived Classes</h3>
 
           {attendanceArchiveColumnsAvailable === false ? (
             <p className="muted">{ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE}</p>
           ) : groupedArchivedRecords.length === 0 ? (
-            <p className="muted">No archived attendance records.</p>
+            <p className="muted">No archived classes.</p>
           ) : (
             groupedArchivedRecords.map((group) => {
               const groupKey = getStudentGroupKey(group.id, true);
@@ -2260,6 +2305,12 @@ export default function AdminRecords() {
                       <span className="archived-class-date">
                         Archived: {formatDateTime(group.session?.archived_at)}
                       </span>
+                      <span>
+                        Deletes permanently: {formatDateTime(group.session?.archive_delete_after)}
+                      </span>
+                      {isArchiveDeadlineOverdue(group.session?.archive_delete_after) && (
+                        <strong className="archive-overdue">Overdue for cleanup</strong>
+                      )}
                       <button
                         type="button"
                         className="secondary-button session-action-button"
@@ -2414,14 +2465,7 @@ export default function AdminRecords() {
                                   />
                                 </td>
                                 <td>
-                                  <button
-                                    type="button"
-                                    className="secondary-button"
-                                    onClick={() => restoreArchivedRecord(record)}
-                                    disabled={restoringId === record.id}
-                                  >
-                                    {restoringId === record.id ? 'Restoring...' : 'Restore'}
-                                  </button>
+                                  Restored with class
                                 </td>
                               </tr>
                             ))}

@@ -23,7 +23,7 @@ test('summary flow is RPC-only and performs zero Storage signed-URL work', () =>
   assert.match(summaryFlow, /get_attendance_session_summaries/);
   assert.doesNotMatch(summaryFlow, /addSignedUrl|\.storage|quiz_attempts/);
   assert.match(summaryFlow, /signedUrlRequestCount:\s*0/);
-  assert.match(functionSource, /const RECORDS_PAGE_SIZE = 5/);
+  assert.match(functionSource, /const RECORDS_PAGE_SIZE = 10/);
 });
 
 test('student media work exists only in the explicit student-detail flow', () => {
@@ -60,7 +60,7 @@ test('frontend rejects stale endpoints and isolates trainer errors from summarie
   const trainerEnd = pageSource.indexOf('async function fetchStudents', trainerStart);
   const trainerFlow = pageSource.slice(trainerStart, trainerEnd);
 
-  assert.match(pageSource, /attendance-lazy-v2/);
+  assert.match(pageSource, /attendance-archive-v3/);
   assert.match(trainerFlow, /setTrainerSignatureErrorByRecordId/);
   assert.doesNotMatch(trainerFlow, /setSummariesError|setStatus/);
   assert.match(pageSource, /finally\s*{/);

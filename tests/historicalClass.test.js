@@ -258,3 +258,7 @@ test('source reads include student evidence paths without generating storage URL
   assert.match(historicalEndpointSource, /signature_path, photo_path, signed_at/);
   assert.doesNotMatch(historicalEndpointSource, /createSignedUrl/);
 });
+
+test('student selection does not show or block on warning fields', () => {
+  assert.doesNotMatch(pageSource, /<th>Warnings<\/th>|selectedWarnings|warningsByStudentId/);
+});

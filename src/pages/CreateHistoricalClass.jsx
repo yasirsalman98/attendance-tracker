@@ -3,7 +3,6 @@ import { Link, useNavigate } from 'react-router-dom';
 import SignaturePad from 'signature_pad';
 import {
   buildHistoricalClassDraft,
-  getStudentWarnings,
   HISTORICAL_STUDENT_COPY_FIELDS,
   validateHistoricalClassInfo,
 } from '../historicalClassModel';
@@ -111,10 +110,6 @@ export default function CreateHistoricalClass({ session }) {
     };
   }, [step, trainerSignatureDataUrl]);
 
-  const warningsByStudentId = useMemo(
-    () => getStudentWarnings(sourceStudents),
-    [sourceStudents]
-  );
   const filteredStudents = useMemo(() => {
     const needle = studentSearch.trim().toLowerCase();
     if (!needle) return sourceStudents;
@@ -130,11 +125,6 @@ export default function CreateHistoricalClass({ session }) {
     studentPage * ROSTER_PAGE_SIZE
   );
   const selectedStudents = sourceStudents.filter((student) => selectedStudentIds.has(student.id));
-  const selectedWarnings = selectedStudents.flatMap((student) =>
-    (warningsByStudentId.get(student.id) || []).map((warning) =>
-      `${student.student_name}: ${warning}`
-    )
-  );
 
   function updateClassInfo(key, value) {
     setClassInfo((current) => ({ ...current, [key]: value }));
@@ -197,9 +187,6 @@ export default function CreateHistoricalClass({ session }) {
   function continueFromStudents() {
     const nextErrors = [];
     if (selectedStudents.length === 0) nextErrors.push('Select at least one student.');
-    if (selectedWarnings.length > 0) {
-      nextErrors.push('Deselect students with duplicate, missing-email, or existing-record warnings before creation.');
-    }
     setErrors(nextErrors);
     if (nextErrors.length === 0) setStep(4);
   }
@@ -344,12 +331,11 @@ export default function CreateHistoricalClass({ session }) {
             </div>
             <div className="historical-roster-table" role="region" aria-label="Source student roster" tabIndex="0">
               <table>
-                <thead><tr><th>Select</th><th>Student</th><th>Email</th><th>Company</th><th>Warnings</th></tr></thead>
+                <thead><tr><th>Select</th><th>Student</th><th>Email</th><th>Company</th></tr></thead>
                 <tbody>{visibleStudents.map((student) => (
                   <tr key={student.id}>
                     <td><input type="checkbox" aria-label={`Select ${student.student_name}`} checked={selectedStudentIds.has(student.id)} onChange={() => toggleStudent(student.id)} /></td>
                     <td>{student.student_name}</td><td>{student.student_email || 'Missing'}</td><td>{student.company || 'N/A'}</td>
-                    <td>{(warningsByStudentId.get(student.id) || []).map((warning) => <span className="historical-warning" key={warning}>{warning}</span>)}</td>
                   </tr>
                 ))}</tbody>
               </table>
@@ -374,7 +360,7 @@ export default function CreateHistoricalClass({ session }) {
             <div className="historical-copy-review"><div><h3>Student information copied from the source class</h3><ul>{HISTORICAL_STUDENT_COPY_FIELDS.map((field) => <li key={field}>{field.replaceAll('_', ' ')}</li>)}</ul></div></div>
             <details><summary>Selected students ({selectedStudents.length})</summary><div className="historical-review-students">{selectedStudents.map((student) => <span key={student.id}>{student.student_name} · {student.student_email}</span>)}</div></details>
             {result && <div className="historical-success" role="status"><strong>Historical class preview completed</strong><span>Created at: {new Date(result.createdAt).toLocaleString()}</span>{result.repeated && <span>Repeated submission returned the original result.</span>}<Link to="/records-7392">View Attendance Records</Link></div>}
-            <div className="historical-actions"><button type="button" className="secondary-button" onClick={() => setStep(3)}>Back</button><button type="button" disabled={Boolean(result) || submitting || selectedWarnings.length > 0} onClick={createLocalHistoricalClass}>{submitting ? 'Creating historical class...' : 'Create Historical Class'}</button></div>
+            <div className="historical-actions"><button type="button" className="secondary-button" onClick={() => setStep(3)}>Back</button><button type="button" disabled={Boolean(result) || submitting} onClick={createLocalHistoricalClass}>{submitting ? 'Creating historical class...' : 'Create Historical Class'}</button></div>
           </div>
         )}
       </div>

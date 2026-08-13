@@ -13,7 +13,8 @@
     "preview": "vite preview",
     "safety:check": "node scripts/check-dangerous-sql.js",
     "backup:storage": "node scripts/backup-storage.js",
-    "archive:dry-run": "node scripts/dry-run-attendance-archive-cleanup.js"
+    "archive:dry-run": "node scripts/dry-run-attendance-archive-cleanup.js",
+    "quiz-archive:backup": "node scripts/backup-overdue-archived-quizzes.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",

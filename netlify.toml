@@ -13,3 +13,6 @@
 
 [functions."attendance-archive-cleanup"]
   schedule = "@daily"
+
+[functions."quiz-archive-cleanup"]
+  schedule = "@daily"

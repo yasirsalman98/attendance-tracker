@@ -5,6 +5,7 @@ import {
 
 const submissions = new Map();
 const READ_RESPONSE_VERSION = 'historical-class-read-v1';
+const WRITE_RESPONSE_VERSION = 'historical-class-v1';
 const RETIRED_LOCAL_CLASSES_STORAGE_KEY = 'excourse-private-historical-classes-v1';
 const LOCAL_CLASSES_STORAGE_KEY = 'excourse-private-historical-classes-v2';
 
@@ -65,6 +66,9 @@ export async function createHistoricalClass({ accessToken, payload }) {
   });
   const data = await response.json().catch(() => null);
   if (!response.ok) throw new Error(data?.error || 'Unable to create historical class.');
+  if (data?.responseVersion !== WRITE_RESPONSE_VERSION) {
+    throw new Error('The historical-class endpoint version does not match this frontend.');
+  }
   return data;
 }
 

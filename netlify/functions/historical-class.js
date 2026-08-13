@@ -8,6 +8,7 @@ import {
 const SETTINGS_ADMIN_EMAIL = 'excourse7233@gmail.com';
 const SOURCE_PAGE_SIZE = 10;
 const READ_RESPONSE_VERSION = 'historical-class-read-v1';
+const WRITE_RESPONSE_VERSION = 'historical-class-v1';
 const SOURCE_SESSION_FIELDS = `
   id,
   course_name,
@@ -249,7 +250,7 @@ export function createHistoricalClassHandler({
         historicalClassId: existingRequest.data.historical_session_id,
         createdAt: existingRequest.data.created_at,
         repeated: true,
-        responseVersion: 'historical-class-v1',
+        responseVersion: WRITE_RESPONSE_VERSION,
       });
     }
     const sourceSession = await adminClient
@@ -313,7 +314,7 @@ export function createHistoricalClassHandler({
           historicalClassId: repeatedRequest.data.historical_session_id,
           createdAt: repeatedRequest.data.created_at,
           repeated: true,
-          responseVersion: 'historical-class-v1',
+          responseVersion: WRITE_RESPONSE_VERSION,
         });
       }
       console.error('Historical class transaction failed:', rpc.error.code || 'rpc_failed');
@@ -328,7 +329,7 @@ export function createHistoricalClassHandler({
       historicalClassId: rpc.data,
       createdAt: createdSession.data?.created_at || new Date().toISOString(),
       createdAtUsesDatabaseDefault: true,
-      responseVersion: 'historical-class-v1',
+      responseVersion: WRITE_RESPONSE_VERSION,
     });
   };
 }

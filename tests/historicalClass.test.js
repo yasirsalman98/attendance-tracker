@@ -23,6 +23,7 @@ const appSource = await readFile(new URL('../src/App.jsx', import.meta.url), 'ut
 const pageSource = await readFile(new URL('../src/pages/CreateHistoricalClass.jsx', import.meta.url), 'utf8');
 const migrationSource = await readFile(new URL('../supabase-historical-class-migration.sql', import.meta.url), 'utf8');
 const historicalEndpointSource = await readFile(new URL('../netlify/functions/historical-class.js', import.meta.url), 'utf8');
+const historicalServiceSource = await readFile(new URL('../src/historicalClassLocalService.js', import.meta.url), 'utf8');
 const adminRecordsSource = await readFile(new URL('../src/pages/AdminRecords.jsx', import.meta.url), 'utf8');
 
 const classInfo = {
@@ -238,6 +239,15 @@ test('historical page uses protected reads and never imports Supabase or Storage
   assert.doesNotMatch(pageSource, /The database.*created_at.*not be backdated/);
   assert.doesNotMatch(pageSource, /supabaseClient|supabase\.|\.storage\.|createSignedUrl/);
   assert.match(pageSource, /import\.meta\.env\.DEV/);
+});
+
+test('historical frontend and endpoint enforce matching read and write versions', () => {
+  assert.match(historicalServiceSource, /READ_RESPONSE_VERSION = 'historical-class-read-v1'/);
+  assert.match(historicalServiceSource, /WRITE_RESPONSE_VERSION = 'historical-class-v1'/);
+  assert.match(historicalServiceSource, /data\?\.responseVersion !== WRITE_RESPONSE_VERSION/);
+  assert.match(historicalEndpointSource, /READ_RESPONSE_VERSION = 'historical-class-read-v1'/);
+  assert.match(historicalEndpointSource, /WRITE_RESPONSE_VERSION = 'historical-class-v1'/);
+  assert.match(historicalEndpointSource, /responseVersion: WRITE_RESPONSE_VERSION/);
 });
 
 test('source reads include student evidence paths without generating storage URLs', () => {

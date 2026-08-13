@@ -67,9 +67,11 @@ test('student and class archive mutations use separate transaction scopes', () =
   assert.match(migration, /where id = p_record_id[\s\S]*archive_type = 'student'/);
 });
 
-test('archive interface separates student and class restores and marks overdue deadlines', () => {
-  assert.match(page, /Archived Students/);
-  assert.match(page, /Archived Classes/);
+test('archive interface uses unified class cards while preserving restore scopes', () => {
+  assert.doesNotMatch(page, /<h3>Archived Students<\/h3>/);
+  assert.doesNotMatch(page, /<h3>Archived Classes<\/h3>/);
+  assert.match(page, /group\.archiveType === 'student'/);
+  assert.match(page, /group\.archiveType === 'class'/);
   assert.match(page, /Restore Student/);
   assert.match(page, /Restore Class/);
   assert.match(page, /Deletes permanently:/);

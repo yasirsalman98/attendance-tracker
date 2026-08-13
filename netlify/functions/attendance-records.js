@@ -670,6 +670,10 @@ export async function handler(event) {
       : recordsQuery.is('archived_at', null);
     if (archiveMode && requestedArchiveType === 'class') {
       recordsQuery = recordsQuery.eq('archive_type', 'class');
+    } else if (archiveMode && requestedArchiveType === 'student') {
+      recordsQuery = recordsQuery.or(
+        'archive_type.eq.student,and(archive_type.is.null,archive_source.eq.deleted_student)'
+      );
     }
 
     let recordsResponse = await recordsQuery;
@@ -902,12 +906,35 @@ export async function handler(event) {
 
     if (response.error) return response;
 
-    const data = (response.data || []).map((row) => ({
+    let data = (response.data || []).map((row) => ({
       ...row.summary,
       ...(archiveType === 'class'
         ? { student_count: Number(row.student_count) || 0 }
         : {}),
     }));
+    if (archiveType === 'student' && data.length > 0) {
+      const sessionIds = [
+        ...new Set(data.map((row) => row.training_session_id).filter(Boolean)),
+      ];
+      let sessionsById = new Map();
+
+      if (sessionIds.length > 0) {
+        const sessionsResponse = await adminClient
+          .from('training_sessions')
+          .select(SESSION_SUMMARY_FIELDS)
+          .in('id', sessionIds);
+
+        if (sessionsResponse.error) return sessionsResponse;
+        sessionsById = new Map(
+          (sessionsResponse.data || []).map((session) => [session.id, session])
+        );
+      }
+
+      data = data.map((row) => ({
+        ...row,
+        training_sessions: sessionsById.get(row.training_session_id) || null,
+      }));
+    }
     const count = Number(response.data?.[0]?.total_count) || 0;
 
     return {

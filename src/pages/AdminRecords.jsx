@@ -560,6 +560,7 @@ function TrainerSignaturePreview({
 export default function AdminRecords() {
   const [records, setRecords] = useState([]);
   const [archivedRecords, setArchivedRecords] = useState([]);
+  const [archivedStudentRecords, setArchivedStudentRecords] = useState([]);
   const [studentArchives, setStudentArchives] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [archivedSessions, setArchivedSessions] = useState([]);
@@ -618,10 +619,50 @@ export default function AdminRecords() {
     () => groupRecordsBySession(records, sessions),
     [records, sessions]
   );
-  const groupedArchivedRecords = useMemo(
-    () => groupRecordsBySession(archivedRecords, archivedSessions),
-    [archivedRecords, archivedSessions]
-  );
+  const studentArchiveSessions = useMemo(() => {
+    const grouped = new Map();
+
+    studentArchives.forEach((record) => {
+      const session = record.training_sessions;
+      if (!session?.id) return;
+      const existing = grouped.get(session.id) || {
+        ...session,
+        archived_at: record.archived_at,
+        archive_delete_after: record.archive_delete_after,
+        student_count: 0,
+        archive_type: 'student',
+      };
+      existing.student_count += 1;
+      if (record.archived_at > existing.archived_at) {
+        existing.archived_at = record.archived_at;
+      }
+      if (
+        record.archive_delete_after &&
+        (!existing.archive_delete_after ||
+          record.archive_delete_after < existing.archive_delete_after)
+      ) {
+        existing.archive_delete_after = record.archive_delete_after;
+      }
+      grouped.set(session.id, existing);
+    });
+
+    return [...grouped.values()];
+  }, [studentArchives]);
+  const groupedArchivedRecords = useMemo(() => {
+    const classGroups = groupRecordsBySession(archivedRecords, archivedSessions).map(
+      (group) => ({ ...group, archiveType: 'class' })
+    );
+    const studentGroups = groupRecordsBySession(
+      archivedStudentRecords,
+      studentArchiveSessions
+    ).map((group) => ({ ...group, archiveType: 'student' }));
+
+    return [...classGroups, ...studentGroups].sort((a, b) =>
+      String(b.session?.archived_at || '').localeCompare(
+        String(a.session?.archived_at || '')
+      )
+    );
+  }, [archivedRecords, archivedSessions, archivedStudentRecords, studentArchiveSessions]);
   const canViewAttendanceArchive = isSettingsAdminUser({
     email: currentUserEmail,
   });
@@ -745,8 +786,14 @@ export default function AdminRecords() {
     }));
   }
 
-  async function fetchStudents(sessionId, archived = false, expand = true) {
-    const groupKey = getStudentGroupKey(sessionId, archived);
+  async function fetchStudents(
+    sessionId,
+    archived = false,
+    expand = true,
+    archiveType = 'class'
+  ) {
+    const cacheSessionId = archived ? `${archiveType}:${sessionId}` : sessionId;
+    const groupKey = getStudentGroupKey(cacheSessionId, archived);
 
     const load = async () => {
       const generation = requestGenerationRef.current;
@@ -768,7 +815,7 @@ export default function AdminRecords() {
           sessionId,
           archived: String(archived),
         });
-        if (archived) query.set('archiveType', 'class');
+        if (archived) query.set('archiveType', archiveType);
         const response = await fetchWithTimeout(
           `${getAttendanceRecordsUrl()}?${query}`,
           { headers: { Authorization: `Bearer ${accessToken}` } },
@@ -792,7 +839,11 @@ export default function AdminRecords() {
           data.quizAttempts || []
         );
         if (generation === requestGenerationRef.current) {
-          const setTargetRecords = archived ? setArchivedRecords : setRecords;
+          const setTargetRecords = archived
+            ? archiveType === 'student'
+              ? setArchivedStudentRecords
+              : setArchivedRecords
+            : setRecords;
           setTargetRecords((current) =>
             replaceSessionRecords(current, sessionId, nextRecords)
           );
@@ -833,8 +884,9 @@ export default function AdminRecords() {
     return nextRecords;
   }
 
-  async function toggleStudents(sessionId, archived = false) {
-    const groupKey = getStudentGroupKey(sessionId, archived);
+  async function toggleStudents(sessionId, archived = false, archiveType = 'class') {
+    const cacheSessionId = archived ? `${archiveType}:${sessionId}` : sessionId;
+    const groupKey = getStudentGroupKey(cacheSessionId, archived);
 
     if (expandedSessionIds.has(groupKey)) {
       setExpandedSessionIds((currentIds) => {
@@ -846,7 +898,7 @@ export default function AdminRecords() {
     }
 
     try {
-      await fetchStudents(sessionId, archived, true);
+      await fetchStudents(sessionId, archived, true, archiveType);
     } catch (error) {
       console.error('Attendance students request error:', error);
     }
@@ -894,6 +946,7 @@ export default function AdminRecords() {
       setPhotoModalError('');
       setRecords([]);
       setArchivedRecords([]);
+      setArchivedStudentRecords([]);
       setStudentArchives([]);
       setSessions([]);
       setArchivedSessions([]);
@@ -2222,45 +2275,16 @@ export default function AdminRecords() {
             </div>
           </div>
 
-          <h3>Archived Students</h3>
-          {attendanceArchiveColumnsAvailable !== false && studentArchives.length === 0 && (
-            <p className="muted">No archived students.</p>
-          )}
-          {attendanceArchiveColumnsAvailable !== false && studentArchives.map((record) => (
-            <section className="session-record-card session-record-card-collapsed" key={`student-archive-${record.id}`}>
-              <div className="session-record-top-row">
-                <div>
-                  <h3>{record.student_name || 'Unnamed student'}</h3>
-                  <p className="muted">Class: {record.class_name || 'N/A'}</p>
-                </div>
-                <div className="session-card-actions">
-                  <span>Archived: {formatDateTime(record.archived_at)}</span>
-                  <span>Deletes permanently: {formatDateTime(record.archive_delete_after)}</span>
-                  {isArchiveDeadlineOverdue(record.archive_delete_after) && (
-                    <strong className="archive-overdue">Overdue for cleanup</strong>
-                  )}
-                  <button
-                    type="button"
-                    className="secondary-button session-action-button"
-                    onClick={() => restoreArchivedRecord(record)}
-                    disabled={restoringId === record.id}
-                  >
-                    {restoringId === record.id ? 'Restoring student...' : 'Restore Student'}
-                  </button>
-                </div>
-              </div>
-            </section>
-          ))}
-
-          <h3>Archived Classes</h3>
-
           {attendanceArchiveColumnsAvailable === false ? (
             <p className="muted">{ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE}</p>
           ) : groupedArchivedRecords.length === 0 ? (
-            <p className="muted">No archived classes.</p>
+            <p className="muted">No archived attendance records.</p>
           ) : (
             groupedArchivedRecords.map((group) => {
-              const groupKey = getStudentGroupKey(group.id, true);
+              const groupKey = getStudentGroupKey(
+                `${group.archiveType}:${group.id}`,
+                true
+              );
               const isExpanded = expandedSessionIds.has(groupKey);
               const loadState = {
                 status: studentsLoadingByRecordId[groupKey]
@@ -2270,7 +2294,7 @@ export default function AdminRecords() {
                     : '',
                 error: studentsErrorByRecordId[groupKey] || '',
               };
-              const studentsRegionId = `archived-students-${group.id}`;
+              const studentsRegionId = `archived-${group.archiveType}-students-${group.id}`;
               const classTitle = group.title || getSessionValue(group.session, 'course_name');
 
               return (
@@ -2280,14 +2304,16 @@ export default function AdminRecords() {
                       ? 'session-record-card-expanded'
                       : 'session-record-card-collapsed'
                   }`}
-                  key={`archive-${group.id}`}
+                  key={`archive-${group.archiveType}-${group.id}`}
                 >
                   <div className="session-record-top-row">
                     <div className="session-record-title-row">
                       <button
                         type="button"
                         className="secondary-button session-expand-button"
-                        onClick={() => toggleStudents(group.id, true)}
+                        onClick={() =>
+                          toggleStudents(group.id, true, group.archiveType)
+                        }
                         aria-expanded={isExpanded}
                         aria-controls={studentsRegionId}
                         disabled={loadState.status === 'loading'}
@@ -2311,16 +2337,18 @@ export default function AdminRecords() {
                       {isArchiveDeadlineOverdue(group.session?.archive_delete_after) && (
                         <strong className="archive-overdue">Overdue for cleanup</strong>
                       )}
-                      <button
-                        type="button"
-                        className="secondary-button session-action-button"
-                        onClick={() => restoreArchivedClass(group)}
-                        disabled={restoringArchivedClassId === group.id}
-                      >
-                        {restoringArchivedClassId === group.id
-                          ? 'Restoring class...'
-                          : 'Restore Class'}
-                      </button>
+                      {group.archiveType === 'class' && (
+                        <button
+                          type="button"
+                          className="secondary-button session-action-button"
+                          onClick={() => restoreArchivedClass(group)}
+                          disabled={restoringArchivedClassId === group.id}
+                        >
+                          {restoringArchivedClassId === group.id
+                            ? 'Restoring class...'
+                            : 'Restore Class'}
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -2415,7 +2443,9 @@ export default function AdminRecords() {
                           <button
                             type="button"
                             className="secondary-button"
-                            onClick={() => toggleStudents(group.id, true)}
+                            onClick={() =>
+                              toggleStudents(group.id, true, group.archiveType)
+                            }
                           >
                             Retry
                           </button>
@@ -2465,7 +2495,20 @@ export default function AdminRecords() {
                                   />
                                 </td>
                                 <td>
-                                  Restored with class
+                                  {group.archiveType === 'student' ? (
+                                    <button
+                                      type="button"
+                                      className="secondary-button"
+                                      onClick={() => restoreArchivedRecord(record)}
+                                      disabled={restoringId === record.id}
+                                    >
+                                      {restoringId === record.id
+                                        ? 'Restoring student...'
+                                        : 'Restore Student'}
+                                    </button>
+                                  ) : (
+                                    'Restored with class'
+                                  )}
                                 </td>
                               </tr>
                             ))}

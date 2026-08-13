@@ -2257,6 +2257,9 @@ export default function AdminRecords() {
                     </div>
 
                     <div className="session-card-actions">
+                      <span className="archived-class-date">
+                        Archived: {formatDateTime(group.session?.archived_at)}
+                      </span>
                       <button
                         type="button"
                         className="secondary-button session-action-button"

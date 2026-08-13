@@ -811,6 +811,47 @@ export async function handler(event) {
       return rpcResponse;
     }
 
+    if (mode === 'archived') {
+      const sessionsMissingArchiveDate = rawSessions.filter(
+        (session) => session?.id && !session.archived_at
+      );
+
+      if (sessionsMissingArchiveDate.length > 0) {
+        const archiveDateStartedAt = Date.now();
+        const archiveDates = await Promise.all(
+          sessionsMissingArchiveDate.map(async (session) => {
+            const response = await adminClient
+              .from('attendance_records')
+              .select('archived_at')
+              .eq('training_session_id', session.id)
+              .not('archived_at', 'is', null)
+              .order('archived_at', { ascending: false })
+              .limit(1)
+              .maybeSingle();
+
+            if (response.error) {
+              console.error('Attendance archive date lookup error:', response.error);
+              return [session.id, null];
+            }
+
+            return [session.id, response.data?.archived_at || null];
+          })
+        );
+        const archiveDatesBySessionId = new Map(archiveDates);
+
+        rawSessions = rawSessions.map((session) => ({
+          ...session,
+          archived_at:
+            session.archived_at || archiveDatesBySessionId.get(session.id) || null,
+        }));
+
+        logDiagnostic(requestId, 'archive_date_lookup_complete', {
+          durationMs: Date.now() - archiveDateStartedAt,
+          classCount: sessionsMissingArchiveDate.length,
+        });
+      }
+    }
+
     const sessions = rawSessions.map((session) => {
       const {
         attendance_records: ignoredCountRelation,

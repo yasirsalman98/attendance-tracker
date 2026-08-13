@@ -44,6 +44,15 @@ test('summary SQL uses the confirmed FK and distinct attendance primary keys', (
   assert.match(migrationSource, /count\(distinct record\.id\)/);
   assert.doesNotMatch(migrationSource, /quiz_attempts/);
   assert.doesNotMatch(migrationSource, /trainer_signature_url/);
+  assert.match(migrationSource, /max\(record\.archived_at\)/);
+});
+
+test('Attendance Archive shows the archived date beside Restore Class', () => {
+  assert.match(pageSource, /Archived:\s*{formatDateTime\(group\.session\?\.archived_at\)}/);
+  assert.match(pageSource, /className="archived-class-date"/);
+  assert.match(pageSource, /Restore Class/);
+  assert.match(functionSource, /\.select\('archived_at'\)/);
+  assert.match(functionSource, /archive_date_lookup_complete/);
 });
 
 test('frontend rejects stale endpoints and isolates trainer errors from summaries', () => {

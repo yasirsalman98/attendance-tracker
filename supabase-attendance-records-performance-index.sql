@@ -39,7 +39,11 @@ as $$
         'owner_user_id', session.owner_user_id,
         'created_at', session.created_at,
         'expires_at', session.expires_at,
-        'archive_status', case when p_archived then 'archived' else 'active' end
+        'archive_status', case when p_archived then 'archived' else 'active' end,
+        'archived_at', case
+          when p_archived then max(record.archived_at)
+          else null
+        end
       ) as summary,
       session.created_at as sort_created_at,
       count(distinct record.id)::bigint as student_count

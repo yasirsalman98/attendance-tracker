@@ -487,8 +487,16 @@ button:disabled {
 .session-card-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.archived-class-date {
+  color: #4b5563;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .session-actions-menu {

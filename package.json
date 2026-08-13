@@ -9,6 +9,7 @@
     "dev:server": "node server/index.js",
     "build": "npm run safety:check && vite build",
     "lint": "eslint .",
+    "test": "node --test tests/*.test.js",
     "preview": "vite preview",
     "safety:check": "node scripts/check-dangerous-sql.js",
     "backup:storage": "node scripts/backup-storage.js"

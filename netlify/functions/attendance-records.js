@@ -6,6 +6,23 @@ const ATTENDANCE_ARCHIVE_SOURCE = 'deleted_student';
 const ATTENDANCE_CLASS_ARCHIVE_SOURCE = 'archived_class';
 const ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE =
   'Attendance archive requires database migration before it can be used.';
+const RECORDS_PAGE_SIZE = 5;
+const RESPONSE_VERSION = 'attendance-lazy-v2';
+const SESSION_SUMMARY_FIELDS = `
+  id,
+  course_name,
+  training_date,
+  trainer_name,
+  company_name,
+  training_location,
+  time_started,
+  time_stopped,
+  course_outline,
+  trainer_signature_path,
+  owner_user_id,
+  created_at,
+  expires_at
+`;
 
 function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
@@ -127,6 +144,13 @@ function jsonResponse(statusCode, body) {
   };
 }
 
+function logDiagnostic(requestId, stage, details = {}) {
+  console.log(
+    'Attendance records diagnostic:',
+    JSON.stringify({ requestId, stage, ...details })
+  );
+}
+
 function getSupabaseClient(key, accessToken = '') {
   const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 
@@ -157,28 +181,24 @@ async function addSignedUrl(client, bucketName, filePath) {
     .createSignedUrl(filePath, 300);
 
   if (error) {
-    console.error(`Signed URL error for ${bucketName}/${filePath}:`, error);
+    console.error('Attendance storage signed URL error:', {
+      bucket: bucketName,
+      code: error.code || null,
+      message: error.message || 'Storage request failed.',
+    });
     return '';
   }
 
   return data?.signedUrl || '';
 }
 
-async function removeStorageFiles(client, bucketName, paths) {
-  // DATA SAFETY: removes signature/photo storage objects. Keep scoped to an
-  // approved user action and prefer soft-delete/archive behavior for new work.
-  const cleanPaths = [...new Set((paths || []).filter(Boolean))];
-
-  if (cleanPaths.length === 0) return;
-
-  const { error } = await client.storage.from(bucketName).remove(cleanPaths);
-
-  if (error) {
-    console.error(`Storage delete error for ${bucketName}:`, error);
-  }
-}
-
 export async function handler(event) {
+  const requestId =
+    event.headers?.['x-nf-request-id'] ||
+    event.headers?.['X-Nf-Request-Id'] ||
+    globalThis.crypto?.randomUUID?.() ||
+    `attendance-${Date.now()}`;
+
   if (!['GET', 'DELETE', 'PATCH'].includes(event.httpMethod)) {
     return jsonResponse(405, { error: 'Method not allowed.' });
   }
@@ -513,228 +533,359 @@ export async function handler(event) {
     });
   }
 
-  const selectRecords = (archiveMode) => {
-    let query = adminClient
+  const query = event.queryStringParameters || {};
+  const view = String(query.view || 'summaries').trim().toLowerCase();
+  const archiveMode = String(query.archived || '').toLowerCase() === 'true';
+
+  if (view === 'trainer-signature') {
+    const sessionId = String(query.sessionId || '').trim();
+
+    if (!sessionId) {
+      return jsonResponse(400, { error: 'Training session id is required.' });
+    }
+
+    const sessionResponse = await adminClient
+      .from('training_sessions')
+      .select('id, owner_user_id, trainer_signature_path')
+      .eq('id', sessionId)
+      .maybeSingle();
+
+    if (sessionResponse.error) {
+      console.error('Trainer signature session lookup error:', sessionResponse.error);
+      logDiagnostic(requestId, 'trainer_signature_session_lookup_failed');
+      return jsonResponse(500, { error: 'Unable to load trainer signature.' });
+    }
+
+    const session = sessionResponse.data;
+
+    if (!session) {
+      return jsonResponse(404, { error: 'Training session was not found.' });
+    }
+
+    if (
+      !isSettingsAdmin &&
+      !sessionMatchesAttendanceAccess(session, userData.user, sharedAttendanceOwnerIds)
+    ) {
+      return jsonResponse(403, { error: 'You do not have access to this class.' });
+    }
+
+    if (!session.trainer_signature_path) {
+      logDiagnostic(requestId, 'trainer_signature_complete', {
+        durationMs: 0,
+        signedUrlCount: 0,
+      });
+      return jsonResponse(200, {
+        signatureUrl: '',
+        responseVersion: RESPONSE_VERSION,
+      });
+    }
+
+    const storageStartedAt = Date.now();
+    let signatureUrl;
+
+    try {
+      signatureUrl = await addSignedUrl(
+        adminClient,
+        'signatures',
+        session.trainer_signature_path
+      );
+    } catch (error) {
+      console.error('Trainer signature storage request failed:', error);
+      logDiagnostic(requestId, 'trainer_signature_storage_failed', {
+        durationMs: Date.now() - storageStartedAt,
+      });
+      return jsonResponse(502, { error: 'Trainer signature is unavailable.' });
+    }
+
+    logDiagnostic(requestId, 'trainer_signature_complete', {
+      durationMs: Date.now() - storageStartedAt,
+      signedUrlCount: signatureUrl ? 1 : 0,
+      failedCount: signatureUrl ? 0 : 1,
+    });
+
+    if (!signatureUrl) {
+      return jsonResponse(502, { error: 'Trainer signature is unavailable.' });
+    }
+
+    return jsonResponse(200, {
+      signatureUrl,
+      responseVersion: RESPONSE_VERSION,
+    });
+  }
+
+  if (view === 'students') {
+    const sessionId = String(query.sessionId || '').trim();
+
+    if (!sessionId) {
+      return jsonResponse(400, { error: 'Training session id is required.' });
+    }
+
+    let session = null;
+
+    if (sessionId !== 'unassigned') {
+      const sessionResponse = await adminClient
+        .from('training_sessions')
+        .select(SESSION_SUMMARY_FIELDS)
+        .eq('id', sessionId)
+        .maybeSingle();
+
+      if (sessionResponse.error) {
+        console.error('Attendance student session lookup error:', sessionResponse.error);
+        return jsonResponse(500, {
+          error: sessionResponse.error.message || 'Unable to load students.',
+        });
+      }
+
+      session = sessionResponse.data;
+
+      if (!session) {
+        return jsonResponse(404, { error: 'Training session was not found.' });
+      }
+
+      if (
+        !isSettingsAdmin &&
+        !sessionMatchesAttendanceAccess(session, userData.user, sharedAttendanceOwnerIds)
+      ) {
+        return jsonResponse(403, { error: 'You do not have access to this class.' });
+      }
+    } else if (!isSettingsAdmin) {
+      return jsonResponse(403, { error: 'You do not have access to these records.' });
+    }
+
+    const studentQueryStartedAt = Date.now();
+    let recordsQuery = adminClient
       .from('attendance_records')
-      .select(`
-        *,
-        training_sessions (*)
-      `)
+      .select('*')
       .order('signed_at', { ascending: false });
 
-    if (archiveMode === 'active') {
-      query = query.is('archived_at', null);
-    } else if (archiveMode === 'archived') {
-      query = query.not('archived_at', 'is', null);
+    recordsQuery = sessionId === 'unassigned'
+      ? recordsQuery.is('training_session_id', null)
+      : recordsQuery.eq('training_session_id', sessionId);
+    recordsQuery = archiveMode
+      ? recordsQuery.not('archived_at', 'is', null)
+      : recordsQuery.is('archived_at', null);
+
+    let recordsResponse = await recordsQuery;
+
+    if (isMissingArchiveColumn(recordsResponse.error) && !archiveMode) {
+      let fallbackRecordsQuery = adminClient
+        .from('attendance_records')
+        .select('*')
+        .order('signed_at', { ascending: false });
+      fallbackRecordsQuery = sessionId === 'unassigned'
+        ? fallbackRecordsQuery.is('training_session_id', null)
+        : fallbackRecordsQuery.eq('training_session_id', sessionId);
+      recordsResponse = await fallbackRecordsQuery;
     }
 
-    return query;
-  };
-
-  let archiveColumnsAvailable = true;
-  let { data, error } = await selectRecords('active');
-
-  if (isMissingArchiveColumn(error)) {
-    archiveColumnsAvailable = false;
-    const fallbackResponse = await selectRecords('all');
-    data = fallbackResponse.data;
-    error = fallbackResponse.error;
-  }
-
-  if (error) {
-    console.error('Attendance records load error:', error);
-    return jsonResponse(500, { error: error.message || 'Unable to load records.' });
-  }
-
-  let archivedData = [];
-
-  if (archiveColumnsAvailable) {
-    const archivedResponse = await selectRecords('archived');
-
-    if (archivedResponse.error) {
-      console.error('Archived attendance records load error:', archivedResponse.error);
+    if (recordsResponse.error) {
+      console.error('Attendance students load error:', recordsResponse.error);
+      logDiagnostic(requestId, 'student_query_failed', {
+        durationMs: Date.now() - studentQueryStartedAt,
+      });
       return jsonResponse(500, {
-        error: archivedResponse.error.message || 'Unable to load archived records.',
+        error: 'Unable to load students.',
       });
     }
 
-    archivedData = archivedResponse.data || [];
-  }
+    logDiagnostic(requestId, 'student_query_complete', {
+      durationMs: Date.now() - studentQueryStartedAt,
+      studentCount: recordsResponse.data?.length || 0,
+      archived: archiveMode,
+    });
 
-  const ownerRecords = (data || []).filter((record) =>
-    isSettingsAdmin ||
-    recordMatchesAttendanceAccess(
-        record,
-        userData.user,
-        sharedAttendanceOwnerIds
-      )
-  );
-  const ownerArchivedRecords = isSettingsAdmin ? archivedData || [] : [];
-  const visibleSessionIdsWithRecords = new Set(
-    ownerRecords
-      .map((record) => record.training_session_id)
-      .filter(Boolean)
-  );
+    let quizAttempts = [];
 
-  const { data: sessionData, error: sessionError } = await adminClient
-    .from('training_sessions')
-    .select('*')
-    .order('training_date', { ascending: false })
-    .order('created_at', { ascending: false });
-
-  if (sessionError) {
-    console.error('Attendance sessions load error:', sessionError);
-    return jsonResponse(500, { error: sessionError.message || 'Unable to load classes.' });
-  }
-
-  const ownerSessions = (sessionData || []).filter((session) =>
-    (isSettingsAdmin ||
-      sessionMatchesAttendanceAccess(
-        session,
-        userData.user,
-        sharedAttendanceOwnerIds
-      )) &&
-    visibleSessionIdsWithRecords.has(session.id)
-  );
-
-  const sessions = await Promise.all(
-    ownerSessions.map(async (session) => ({
-      ...session,
-      trainer_signature_url:
-        session.trainer_signature_url ||
-        (await addSignedUrl(
-          adminClient,
-          'signatures',
-          session.trainer_signature_path
-        )),
-    }))
-  );
-
-  const records = await Promise.all(
-    ownerRecords.map(async (record) => {
-      const session = record.training_sessions;
-      const trainerSignatureUrl =
-        session?.trainer_signature_url ||
-        (await addSignedUrl(
-          adminClient,
-          'signatures',
-          session?.trainer_signature_path
-        ));
-
-      return {
-        ...record,
-        signature_url:
-          record.signature_url ||
-          (await addSignedUrl(adminClient, 'signatures', record.signature_path)),
-        photo_url: await addSignedUrl(
-          adminClient,
-          'attendance-photos',
-          record.photo_path
-        ),
-        training_sessions: session
-          ? {
-              ...session,
-              trainer_signature_url: trainerSignatureUrl,
-            }
-          : session,
-      };
-    })
-  );
-  const archivedRecords = await Promise.all(
-    ownerArchivedRecords.map(async (record) => {
-      const session = record.training_sessions;
-      const trainerSignatureUrl =
-        session?.trainer_signature_url ||
-        (await addSignedUrl(
-          adminClient,
-          'signatures',
-          session?.trainer_signature_path
-        ));
-
-      return {
-        ...record,
-        signature_url:
-          record.signature_url ||
-          (await addSignedUrl(adminClient, 'signatures', record.signature_path)),
-        photo_url: await addSignedUrl(
-          adminClient,
-          'attendance-photos',
-          record.photo_path
-        ),
-        training_sessions: session
-          ? {
-              ...session,
-              trainer_signature_url: trainerSignatureUrl,
-            }
-          : session,
-      };
-    })
-  );
-  const visibleSessionIds = [
-    ...new Set(records.map((record) => record.training_session_id).filter(Boolean)),
-  ];
-  let quizAttempts = [];
-
-  if (visibleSessionIds.length > 0) {
-    const selectLinkedQuizAttempts = (includeArchiveField) => {
-      const quizTemplateFields = includeArchiveField
-        ? 'id, owner_user_id, training_session_id, archived_at'
-        : 'id, owner_user_id, training_session_id';
-
-      return adminClient
+    if (!archiveMode && sessionId !== 'unassigned') {
+      const selectAttempts = (includeArchiveField) => adminClient
         .from('quiz_attempts')
         .select(`
-          id,
-          student_name,
-          student_email,
-          training_session_id,
-          attendance_record_id,
-          completed_at,
-          submitted_at,
-          quiz_templates (
-            ${quizTemplateFields}
-          )
+          id, student_name, student_email, training_session_id,
+          attendance_record_id, completed_at, submitted_at,
+          quiz_templates (${includeArchiveField ? 'id, archived_at' : 'id'})
         `)
-        .in('training_session_id', visibleSessionIds);
+        .eq('training_session_id', sessionId);
+      let attemptsResponse = await selectAttempts(true);
+
+      if (isMissingArchiveColumn(attemptsResponse.error)) {
+        attemptsResponse = await selectAttempts(false);
+      }
+
+      if (!isMissingQuizSessionLinkColumn(attemptsResponse.error)) {
+        if (attemptsResponse.error) {
+          console.error('Linked quiz attempts load error:', attemptsResponse.error);
+          logDiagnostic(requestId, 'student_quiz_query_failed', {
+            code: attemptsResponse.error.code || null,
+          });
+        } else {
+          quizAttempts = (attemptsResponse.data || []).filter(
+            (attempt) => !attempt.quiz_templates?.archived_at
+          );
+        }
+      }
+    }
+
+    const storageStartedAt = Date.now();
+    let storageRequestCount = 0;
+    let storageSuccessCount = 0;
+    const signAsset = async (bucketName, path) => {
+      if (!path) return '';
+      storageRequestCount += 1;
+      const signedUrl = await addSignedUrl(adminClient, bucketName, path);
+      if (signedUrl) storageSuccessCount += 1;
+      return signedUrl;
     };
+    let records;
 
-    let attemptsResponse = await selectLinkedQuizAttempts(true);
-
-    if (isMissingArchiveColumn(attemptsResponse.error)) {
-      attemptsResponse = await selectLinkedQuizAttempts(false);
-    }
-
-    if (isMissingQuizSessionLinkColumn(attemptsResponse.error)) {
-      quizAttempts = [];
-    } else if (attemptsResponse.error) {
-      console.error('Linked quiz attempts load error:', attemptsResponse.error);
-    } else {
-      quizAttempts = (attemptsResponse.data || []).filter((attempt) => {
-        const quizOwnerId = attempt.quiz_templates?.owner_user_id;
-
-        return (
-          !attempt.quiz_templates?.archived_at &&
-          (isSettingsAdmin ||
-            quizOwnerId === userData.user.id ||
-            sharedAttendanceOwnerIds.has(quizOwnerId))
-        );
+    try {
+      records = await Promise.all((recordsResponse.data || []).map(async (record) => ({
+        ...record,
+        signature_url:
+          record.signature_url ||
+          (await signAsset('signatures', record.signature_path)),
+        photo_url:
+          record.photo_url ||
+          (await signAsset('attendance-photos', record.photo_path)),
+        training_sessions: session,
+      })));
+    } catch (error) {
+      console.error('Student storage signed URL stage failed:', error);
+      logDiagnostic(requestId, 'student_storage_failed', {
+        durationMs: Date.now() - storageStartedAt,
+        signedUrlRequestCount: storageRequestCount,
       });
+      return jsonResponse(502, { error: 'Unable to load student media.' });
     }
+
+    logDiagnostic(requestId, 'student_storage_complete', {
+      durationMs: Date.now() - storageStartedAt,
+      signedUrlRequestCount: storageRequestCount,
+      signedUrlSuccessCount: storageSuccessCount,
+    });
+
+    return jsonResponse(200, {
+      records,
+      quizAttempts,
+      responseVersion: RESPONSE_VERSION,
+    });
+  }
+
+  const requestedPage = Math.max(1, Number.parseInt(query.page, 10) || 1);
+  const requestedArchivePage = Math.max(
+    1,
+    Number.parseInt(query.archivePage, 10) || 1
+  );
+  const scope = ['active', 'archived'].includes(query.scope) ? query.scope : 'all';
+  const accessibleOwnerIds = [
+    ...new Set([userData.user.id, ...sharedAttendanceOwnerIds]),
+  ];
+
+  const selectSessionSummaries = async (mode, page) => {
+    const from = (page - 1) * RECORDS_PAGE_SIZE;
+    const rpcStartedAt = Date.now();
+    const rpcResponse = await adminClient.rpc(
+      'get_attendance_session_summaries',
+      {
+        p_owner_ids: isSettingsAdmin ? null : accessibleOwnerIds,
+        p_archived: mode === 'archived',
+        p_offset: from,
+        p_limit: RECORDS_PAGE_SIZE,
+      }
+    );
+    let rawSessions;
+    let totalCount;
+    const source = 'rpc';
+
+    if (!rpcResponse.error) {
+      rawSessions = (rpcResponse.data || []).map((row) => ({
+        ...row.summary,
+        student_count: row.student_count || 0,
+      }));
+      totalCount = rpcResponse.data?.[0]?.total_count || 0;
+    } else {
+      logDiagnostic(requestId, 'summary_rpc_failed', {
+        durationMs: Date.now() - rpcStartedAt,
+        mode,
+        code: rpcResponse.error.code || null,
+      });
+      return rpcResponse;
+    }
+
+    const sessions = rawSessions.map((session) => {
+      const {
+        attendance_records: ignoredCountRelation,
+        trainer_signature_url: ignoredTrainerSignatureUrl,
+        ...classFields
+      } = session;
+      void ignoredCountRelation;
+      void ignoredTrainerSignatureUrl;
+
+      return classFields;
+    });
+
+    logDiagnostic(requestId, 'summary_query_complete', {
+      durationMs: Date.now() - rpcStartedAt,
+      mode,
+      source,
+      returnedCount: sessions.length,
+      totalCount,
+      signedUrlRequestCount: 0,
+    });
+
+    return {
+      data: sessions,
+      count: totalCount,
+      error: null,
+      hasMore: from + sessions.length < totalCount,
+      source,
+    };
+  };
+
+  const archiveColumnsAvailable = true;
+  const emptySummaryResponse = { data: [], count: 0, hasMore: false, error: null };
+  const [activeResponse, archivedResponse] = await Promise.all([
+    scope !== 'archived'
+      ? selectSessionSummaries('active', requestedPage)
+      : Promise.resolve(emptySummaryResponse),
+    scope !== 'active' && isSettingsAdmin && archiveColumnsAvailable
+      ? selectSessionSummaries('archived', requestedArchivePage)
+      : Promise.resolve(emptySummaryResponse),
+  ]);
+
+  if (activeResponse.error) {
+    console.error('Attendance class summaries load error:', activeResponse.error);
+    return jsonResponse(500, {
+      error: 'Unable to load attendance records.',
+    });
+  }
+
+  if (archivedResponse.error) {
+    console.error('Archived attendance class summaries load error:', archivedResponse.error);
+    return jsonResponse(500, {
+      error: 'Unable to load archived records.',
+    });
   }
 
   return jsonResponse(200, {
-    records,
-    archivedRecords,
-    sessions,
-    quizAttempts,
-    totalRecordCount: (data || []).length,
-    ownedRecordCount: ownerRecords.length,
-    ownedArchivedRecordCount: ownerArchivedRecords.length,
-    totalSessionCount: (sessionData || []).length,
-    ownedSessionCount: ownerSessions.length,
+    records: [],
+    archivedRecords: [],
+    sessions: activeResponse.data || [],
+    archivedSessions: archivedResponse.data || [],
+    page: requestedPage,
+    archivePage: requestedArchivePage,
+    pageSize: RECORDS_PAGE_SIZE,
+    hasMoreRecords: Boolean(activeResponse.hasMore),
+    hasMoreArchivedRecords: Boolean(archivedResponse.hasMore),
+    totalClassCount: activeResponse.count || 0,
+    totalArchivedClassCount: archivedResponse.count || 0,
     canManageAttendanceRecords: canManageAssignedAttendanceRecords,
     archiveColumnsAvailable,
     attendanceRecordsCompany,
     email: userData.user.email || '',
+    responseVersion: RESPONSE_VERSION,
+    summarySource: {
+      active: activeResponse.source || null,
+      archived: archivedResponse.source || null,
+    },
   });
 }

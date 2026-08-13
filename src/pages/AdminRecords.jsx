@@ -1,8 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import ExcelJS from 'exceljs';
 import { supabase } from '../supabaseClient';
+import {
+  fetchWithTimeout,
+  getStudentGroupKey,
+  loadStudentsWithCache,
+  replaceSessionRecords,
+} from './adminRecordsLazy';
 
 const SHAREPOINT_ARCHIVE_EMAILS = new Set([
   'excourse7233@gmail.com',
@@ -32,31 +38,8 @@ function isValidStudentEmail(value) {
   );
 }
 
-function isMissingQuizSessionLinkColumn(error) {
-  const message = String(error?.message || '').toLowerCase();
-
-  return (
-    message.includes('schema cache') &&
-    (message.includes('training_session_id') ||
-      message.includes('attendance_record_id') ||
-      message.includes('completed_at'))
-  );
-}
-
 function isSettingsAdminUser(user) {
   return normalizeEmail(user?.email) === SETTINGS_ADMIN_EMAIL;
-}
-
-function isMissingArchiveColumn(error) {
-  const message = String(error?.message || '').toLowerCase();
-
-  return (
-    (error?.code === '42703' || message.includes('column')) &&
-    (message.includes('archived_at') ||
-      message.includes('archived_by') ||
-      message.includes('archive_delete_after') ||
-      message.includes('archive_source'))
-  );
 }
 
 function getAssetAccessFromUser(user) {
@@ -83,24 +66,6 @@ function getAttendanceRecordsCompanyFromUser(user) {
   }
 
   return String(metadata.template_designs?.attendanceRecordsCompany || '').trim();
-}
-
-function filterRecordsByAttendanceAccess(records, user) {
-  if (isSettingsAdminUser(user)) {
-    return records;
-  }
-
-  return records.filter(
-    (record) => record.training_sessions?.owner_user_id === user?.id
-  );
-}
-
-function filterSessionsByAttendanceAccess(sessions, user) {
-  if (isSettingsAdminUser(user)) {
-    return sessions;
-  }
-
-  return sessions.filter((session) => session.owner_user_id === user?.id);
 }
 
 function canManageAttendanceRecordsFromUser(user) {
@@ -130,14 +95,9 @@ function getSessionValue(session, key) {
   return session?.[key] || 'N/A';
 }
 
-function getUniqueSessionIds(records) {
-  return [
-    ...new Set(
-      records
-        .map((record) => record.training_session_id)
-        .filter(Boolean)
-    ),
-  ];
+function getStudentCount(session, records = []) {
+  const count = Number(session?.student_count);
+  return Number.isFinite(count) ? count : records.length;
 }
 
 function getQuizCompletionMap(records, quizAttempts) {
@@ -193,18 +153,6 @@ function applyQuizCompletionToRecords(records, quizAttempts) {
   return records.map((record) => ({
     ...record,
     quiz_completed: Boolean(quizCompletionMap.get(record.id)),
-  }));
-}
-
-function mergeRecordSessions(records, sessions) {
-  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
-
-  return records.map((record) => ({
-    ...record,
-    training_sessions:
-      record.training_sessions ||
-      sessionsById.get(record.training_session_id) ||
-      null,
   }));
 }
 
@@ -403,8 +351,8 @@ function groupRecordsBySession(records, sessions = []) {
   });
 
   const sessionGroups = Array.from(groupsById.values()).sort((a, b) => {
-    const dateA = a.session?.training_date || '';
-    const dateB = b.session?.training_date || '';
+    const dateA = a.session?.created_at || a.session?.training_date || '';
+    const dateB = b.session?.created_at || b.session?.training_date || '';
     return dateB.localeCompare(dateA);
   });
 
@@ -562,66 +510,46 @@ function StudentPhotoThumbnail({ record, onOpen, onError }) {
   );
 }
 
-function TrainerSignaturePreview({ session, onError }) {
-  const [signatureUrl, setSignatureUrl] = useState(
-    session?.trainer_signature_url || ''
-  );
-  const [isLoading, setIsLoading] = useState(
-    Boolean(session?.trainer_signature_path)
-  );
+function TrainerSignaturePreview({
+  session,
+  signatureUrl,
+  isLoading,
+  error,
+  onLoad,
+  onImageError,
+}) {
+  if (!session?.trainer_signature_path) return 'N/A';
 
-  useEffect(() => {
-    let isActive = true;
+  if (signatureUrl) {
+    return (
+      <img
+        src={signatureUrl}
+        alt="Trainer signature"
+        className="signature-preview"
+        onError={onImageError}
+      />
+    );
+  }
 
-    async function loadSignatureUrl() {
-      if (!session?.trainer_signature_path) {
-        setSignatureUrl(session?.trainer_signature_url || '');
-        setIsLoading(false);
-        return;
-      }
+  if (isLoading) {
+    return <span className="muted" role="status">Loading signature...</span>;
+  }
 
-      if (session?.trainer_signature_url) {
-        setSignatureUrl(session.trainer_signature_url);
-        setIsLoading(false);
-        return;
-      }
-
-      setIsLoading(true);
-
-      const { data, error } = await supabase.storage
-        .from('signatures')
-        .createSignedUrl(session.trainer_signature_path, 300);
-
-      if (!isActive) return;
-
-      if (error) {
-        console.error('Trainer signature URL error:', error);
-        onError?.('Unable to load trainer signature.');
-        setSignatureUrl('');
-      } else {
-        setSignatureUrl(data?.signedUrl || '');
-      }
-
-      setIsLoading(false);
-    }
-
-    loadSignatureUrl();
-
-    return () => {
-      isActive = false;
-    };
-  }, [session?.trainer_signature_path, session?.trainer_signature_url, onError]);
-
-  if (isLoading) return 'Loading...';
-  if (!signatureUrl) return 'N/A';
+  if (error) {
+    return (
+      <span className="trainer-signature-error">
+        Trainer signature unavailable
+        <button type="button" className="secondary-button trainer-signature-retry" onClick={onLoad}>
+          Retry
+        </button>
+      </span>
+    );
+  }
 
   return (
-    <img
-      src={signatureUrl}
-      alt="Trainer signature"
-      className="signature-preview"
-      onError={() => onError?.('Unable to load trainer signature.')}
-    />
+    <button type="button" className="secondary-button" onClick={onLoad}>
+      Show Trainer Signature
+    </button>
   );
 }
 
@@ -629,6 +557,7 @@ export default function AdminRecords() {
   const [records, setRecords] = useState([]);
   const [archivedRecords, setArchivedRecords] = useState([]);
   const [sessions, setSessions] = useState([]);
+  const [archivedSessions, setArchivedSessions] = useState([]);
   const [currentUserEmail, setCurrentUserEmail] = useState('');
   const [currentUserId, setCurrentUserId] = useState('');
   const [canManageAttendanceRecords, setCanManageAttendanceRecords] =
@@ -637,7 +566,9 @@ export default function AdminRecords() {
     certificateTemplate: true,
     walletCards: true,
   });
-  const [status, setStatus] = useState('Loading records...');
+  const [status, setStatus] = useState('');
+  const [summariesLoading, setSummariesLoading] = useState(true);
+  const [summariesError, setSummariesError] = useState('');
   const [deletingId, setDeletingId] = useState(null);
   const [restoringId, setRestoringId] = useState(null);
   const [restoringArchivedClassId, setRestoringArchivedClassId] = useState(null);
@@ -655,14 +586,36 @@ export default function AdminRecords() {
   const [photoModalError, setPhotoModalError] = useState('');
   const [expandedSessionIds, setExpandedSessionIds] = useState(() => new Set());
   const [openSessionActionsId, setOpenSessionActionsId] = useState('');
+  const [studentsLoadingByRecordId, setStudentsLoadingByRecordId] = useState({});
+  const [studentsErrorByRecordId, setStudentsErrorByRecordId] = useState({});
+  const [trainerSignatureUrlsByRecordId, setTrainerSignatureUrlsByRecordId] =
+    useState({});
+  const [trainerSignatureLoadingByRecordId, setTrainerSignatureLoadingByRecordId] =
+    useState({});
+  const [trainerSignatureErrorByRecordId, setTrainerSignatureErrorByRecordId] =
+    useState({});
+  const [recordsPage, setRecordsPage] = useState(1);
+  const [archivePage, setArchivePage] = useState(1);
+  const [hasMoreRecords, setHasMoreRecords] = useState(false);
+  const [hasMoreArchivedRecords, setHasMoreArchivedRecords] = useState(false);
+  const [loadMoreLoading, setLoadMoreLoading] = useState('');
+  const [loadMoreError, setLoadMoreError] = useState('');
+  const studentCacheRef = useRef(new Map());
+  const studentRequestsRef = useRef(new Map());
+  const trainerSignatureCacheRef = useRef(new Map());
+  const trainerSignatureRequestsRef = useRef(new Map());
+  const summariesControllerRef = useRef(null);
+  const studentControllersRef = useRef(new Map());
+  const trainerSignatureControllersRef = useRef(new Map());
+  const requestGenerationRef = useRef(0);
 
   const groupedRecords = useMemo(
     () => groupRecordsBySession(records, sessions),
     [records, sessions]
   );
   const groupedArchivedRecords = useMemo(
-    () => groupRecordsBySession(archivedRecords),
-    [archivedRecords]
+    () => groupRecordsBySession(archivedRecords, archivedSessions),
+    [archivedRecords, archivedSessions]
   );
   const canViewAttendanceArchive = isSettingsAdminUser({
     email: currentUserEmail,
@@ -689,89 +642,208 @@ export default function AdminRecords() {
     setPhotoModalError('');
   }
 
-  function toggleSessionExpanded(sessionId) {
-    setExpandedSessionIds((currentIds) => {
-      const nextIds = new Set(currentIds);
-
-      if (nextIds.has(sessionId)) {
-        nextIds.delete(sessionId);
-      } else {
-        nextIds.add(sessionId);
-      }
-
-      return nextIds;
-    });
-  }
-
   function toggleSessionActions(sessionId) {
     setOpenSessionActionsId((currentId) =>
       currentId === sessionId ? '' : sessionId
     );
   }
 
-  function showLoadedRecords(
-    nextRecords,
-    nextSessions = [],
-    nextArchivedRecords = archivedRecords
-  ) {
-    setRecords(nextRecords);
-    setSessions(nextSessions);
-    setArchivedRecords(nextArchivedRecords);
-    setExpandedSessionIds(
-      new Set(
-        [
-          ...groupRecordsBySession(nextRecords, nextSessions),
-          ...groupRecordsBySession(nextArchivedRecords),
-        ].map((group) => group.id)
-      )
-    );
+  function abortPendingRequests() {
+    summariesControllerRef.current?.abort();
+    studentControllersRef.current.forEach((controller) => controller.abort());
+    trainerSignatureControllersRef.current.forEach((controller) => controller.abort());
+    studentControllersRef.current.clear();
+    trainerSignatureControllersRef.current.clear();
   }
 
-  async function loadLinkedQuizAttemptsForRecords(nextRecords) {
-    const sessionIds = getUniqueSessionIds(nextRecords);
+  async function loadTrainerSignature(session) {
+    const sessionId = session?.id;
+    const signaturePath = session?.trainer_signature_path;
 
-    if (sessionIds.length === 0) return [];
+    if (!sessionId || !signaturePath) return;
 
-    const selectLinkedQuizAttempts = (includeArchiveField) => {
-      const quizTemplateFields = includeArchiveField
-        ? 'id, archived_at'
-        : 'id';
+    setTrainerSignatureLoadingByRecordId((current) => ({
+      ...current,
+      [sessionId]: true,
+    }));
+    setTrainerSignatureErrorByRecordId((current) => ({
+      ...current,
+      [sessionId]: '',
+    }));
 
-      return supabase
-        .from('quiz_attempts')
-        .select(`
-          id,
-          student_name,
-          student_email,
-          training_session_id,
-          attendance_record_id,
-          completed_at,
-          submitted_at,
-          quiz_templates (
-            ${quizTemplateFields}
-          )
-        `)
-        .in('training_session_id', sessionIds);
+    try {
+      const signatureUrl = await loadStudentsWithCache({
+        cache: trainerSignatureCacheRef.current,
+        inFlight: trainerSignatureRequestsRef.current,
+        key: signaturePath,
+        load: async () => {
+          const controller = new AbortController();
+          trainerSignatureControllersRef.current.set(signaturePath, controller);
+          const accessToken = await getAccessToken();
+          const query = new URLSearchParams({
+            view: 'trainer-signature',
+            sessionId,
+          });
+          const response = await fetchWithTimeout(
+            `${getAttendanceRecordsUrl()}?${query}`,
+            { headers: { Authorization: `Bearer ${accessToken}` } },
+            { controller, timeoutMs: 12000 }
+          );
+          const data = await response.json().catch(() => null);
+
+          if (response.ok && data?.responseVersion !== 'attendance-lazy-v2') {
+            throw new Error('The optimized attendance endpoint is not deployed.');
+          }
+
+          if (
+            !response.ok ||
+            !data?.signatureUrl
+          ) {
+            throw new Error(data?.error || 'Trainer signature is unavailable.');
+          }
+
+          return data.signatureUrl;
+        },
+      });
+
+      setTrainerSignatureUrlsByRecordId((current) => ({
+        ...current,
+        [sessionId]: signatureUrl,
+      }));
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        console.error('Trainer signature request error:', error);
+        setTrainerSignatureErrorByRecordId((current) => ({
+          ...current,
+          [sessionId]: error?.message || 'Trainer signature is unavailable.',
+        }));
+      }
+    } finally {
+      trainerSignatureControllersRef.current.delete(signaturePath);
+      setTrainerSignatureLoadingByRecordId((current) => ({
+        ...current,
+        [sessionId]: false,
+      }));
+    }
+  }
+
+  function handleTrainerSignatureImageError(session) {
+    if (!session?.id) return;
+    trainerSignatureCacheRef.current.delete(session.trainer_signature_path);
+    setTrainerSignatureUrlsByRecordId((current) => ({
+      ...current,
+      [session.id]: '',
+    }));
+    setTrainerSignatureErrorByRecordId((current) => ({
+      ...current,
+      [session.id]: 'Trainer signature is unavailable.',
+    }));
+  }
+
+  async function fetchStudents(sessionId, archived = false, expand = true) {
+    const groupKey = getStudentGroupKey(sessionId, archived);
+
+    const load = async () => {
+      const generation = requestGenerationRef.current;
+      const controller = new AbortController();
+      studentControllersRef.current.set(groupKey, controller);
+      setStudentsLoadingByRecordId((current) => ({
+        ...current,
+        [groupKey]: true,
+      }));
+      setStudentsErrorByRecordId((current) => ({
+        ...current,
+        [groupKey]: '',
+      }));
+
+      try {
+        const accessToken = await getAccessToken();
+        const query = new URLSearchParams({
+          view: 'students',
+          sessionId,
+          archived: String(archived),
+        });
+        const response = await fetchWithTimeout(
+          `${getAttendanceRecordsUrl()}?${query}`,
+          { headers: { Authorization: `Bearer ${accessToken}` } },
+          { controller, timeoutMs: 20000 }
+        );
+        const data = await response.json().catch(() => null);
+
+        if (response.ok && data?.responseVersion !== 'attendance-lazy-v2') {
+          throw new Error('The optimized attendance endpoint is not deployed.');
+        }
+
+        if (
+          !response.ok ||
+          !Array.isArray(data?.records)
+        ) {
+          throw new Error(data?.error || 'Unable to load students.');
+        }
+
+        const nextRecords = applyQuizCompletionToRecords(
+          data.records,
+          data.quizAttempts || []
+        );
+        if (generation === requestGenerationRef.current) {
+          const setTargetRecords = archived ? setArchivedRecords : setRecords;
+          setTargetRecords((current) =>
+            replaceSessionRecords(current, sessionId, nextRecords)
+          );
+        }
+
+        return nextRecords;
+      } catch (error) {
+        const message = error?.message || 'Unable to load students.';
+        if (generation === requestGenerationRef.current && error?.name !== 'AbortError') {
+          setStudentsErrorByRecordId((current) => ({
+            ...current,
+            [groupKey]: message,
+          }));
+        }
+        throw error;
+      } finally {
+        studentControllersRef.current.delete(groupKey);
+        if (generation === requestGenerationRef.current) {
+          setStudentsLoadingByRecordId((current) => ({
+            ...current,
+            [groupKey]: false,
+          }));
+        }
+      }
     };
 
-    let { data, error } = await selectLinkedQuizAttempts(true);
+    const nextRecords = await loadStudentsWithCache({
+      cache: studentCacheRef.current,
+      inFlight: studentRequestsRef.current,
+      key: groupKey,
+      load,
+    });
 
-    if (isMissingArchiveColumn(error)) {
-      const fallbackResponse = await selectLinkedQuizAttempts(false);
-      data = fallbackResponse.data;
-      error = fallbackResponse.error;
+    if (expand) {
+      setExpandedSessionIds((currentIds) => new Set(currentIds).add(groupKey));
     }
 
-    if (isMissingQuizSessionLinkColumn(error)) {
-      return [];
+    return nextRecords;
+  }
+
+  async function toggleStudents(sessionId, archived = false) {
+    const groupKey = getStudentGroupKey(sessionId, archived);
+
+    if (expandedSessionIds.has(groupKey)) {
+      setExpandedSessionIds((currentIds) => {
+        const nextIds = new Set(currentIds);
+        nextIds.delete(groupKey);
+        return nextIds;
+      });
+      return;
     }
 
-    if (error) {
-      console.error('Load linked quiz attempts error:', error);
-      return [];
+    try {
+      await fetchStudents(sessionId, archived, true);
+    } catch (error) {
+      console.error('Attendance students request error:', error);
     }
-
-    return (data || []).filter((attempt) => !attempt.quiz_templates?.archived_at);
   }
 
   async function downloadSelectedPhoto() {
@@ -801,15 +873,50 @@ export default function AdminRecords() {
     }
   }
 
-  async function loadRecords() {
-    setStatus('Loading records...');
-    setPhotoModalError('');
+  async function loadRecords({
+    page = 1,
+    nextArchivePage = 1,
+    scope = 'all',
+    append = false,
+  } = {}) {
+    if (!append) {
+      requestGenerationRef.current += 1;
+      abortPendingRequests();
+      setSummariesLoading(true);
+      setSummariesError('');
+      setStatus('');
+      setPhotoModalError('');
+      setRecords([]);
+      setArchivedRecords([]);
+      setSessions([]);
+      setArchivedSessions([]);
+      setRecordsPage(1);
+      setArchivePage(1);
+      setHasMoreRecords(false);
+      setHasMoreArchivedRecords(false);
+      setExpandedSessionIds(new Set());
+      setStudentsLoadingByRecordId({});
+      setStudentsErrorByRecordId({});
+      setTrainerSignatureUrlsByRecordId({});
+      setTrainerSignatureLoadingByRecordId({});
+      setTrainerSignatureErrorByRecordId({});
+      studentCacheRef.current.clear();
+      studentRequestsRef.current.clear();
+      trainerSignatureCacheRef.current.clear();
+      trainerSignatureRequestsRef.current.clear();
+    } else {
+      setLoadMoreLoading(scope);
+      setLoadMoreError('');
+    }
+
+    summariesControllerRef.current?.abort();
+    const controller = new AbortController();
+    summariesControllerRef.current = controller;
 
     const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
     const accessToken = sessionData?.session?.access_token;
     const user = sessionData?.session?.user;
     const userEmail = user?.email || '';
-    const userCanViewAttendanceArchive = isSettingsAdminUser(user);
 
     setCurrentUserEmail(userEmail.trim().toLowerCase());
     setCurrentUserId(user?.id || '');
@@ -818,175 +925,102 @@ export default function AdminRecords() {
 
     if (sessionError || !accessToken) {
       console.error('Attendance records auth error:', sessionError);
-      setStatus('Please sign in again to view attendance records.');
+      setSummariesError('Please sign in again to view attendance records.');
+      setSummariesLoading(false);
+      setLoadMoreLoading('');
+      if (summariesControllerRef.current === controller) {
+        summariesControllerRef.current = null;
+      }
       return;
     }
 
     try {
-      const response = await fetch(getAttendanceRecordsUrl(), {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+      const query = new URLSearchParams({
+        page: String(page),
+        archivePage: String(nextArchivePage),
+        scope,
+      });
+      const response = await fetchWithTimeout(
+        `${getAttendanceRecordsUrl()}?${query}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+        { controller, timeoutMs: 15000 }
+      );
+      const data = await response.json().catch(() => null);
+
+      if (response.ok && data?.responseVersion !== 'attendance-lazy-v2') {
+        throw new Error(
+          'The optimized attendance endpoint is not deployed. Deploy the latest function and refresh.'
+        );
+      }
+
+      if (
+        !response.ok ||
+        !Array.isArray(data?.sessions)
+      ) {
+        throw new Error(data?.error || 'Unable to load attendance records.');
+      }
+
+      const returnedSummaries = [
+        ...data.sessions,
+        ...(data.archivedSessions || []),
+      ];
+
+      if (
+        returnedSummaries.some(
+          (session) => !Number.isFinite(Number(session?.student_count))
+        )
+      ) {
+        throw new Error(
+          'The attendance summary response is missing student totals. Deploy the latest function and Supabase migration.'
+        );
+      }
+
+      console.info('Attendance summaries response:', {
+        responseVersion: data.responseVersion,
+        summarySource: data.summarySource,
+        pageSize: data.pageSize,
       });
 
-      const contentType = response.headers.get('Content-Type') || '';
+      setCanManageAttendanceRecords(Boolean(data.canManageAttendanceRecords));
+      if (typeof data.archiveColumnsAvailable === 'boolean') {
+        setAttendanceArchiveColumnsAvailable(data.archiveColumnsAvailable);
+      }
 
-      if (response.ok && contentType.includes('application/json')) {
-        const data = await response.json().catch(() => null);
+      if (scope !== 'archived') {
+        setSessions((current) => append ? [...current, ...data.sessions] : data.sessions);
+        setRecordsPage(page);
+        setHasMoreRecords(Boolean(data.hasMoreRecords));
+      }
 
-        if (Array.isArray(data?.records)) {
-          setCanManageAttendanceRecords(Boolean(data.canManageAttendanceRecords));
-          if (typeof data.archiveColumnsAvailable === 'boolean') {
-            setAttendanceArchiveColumnsAvailable(data.archiveColumnsAvailable);
-          }
-          const linkedRecords = applyQuizCompletionToRecords(
-            data.records,
-            data.quizAttempts || []
+      if (scope !== 'active') {
+        const nextArchivedSessions = data.archivedSessions || [];
+        setArchivedSessions((current) =>
+          append ? [...current, ...nextArchivedSessions] : nextArchivedSessions
+        );
+        setArchivePage(nextArchivePage);
+        setHasMoreArchivedRecords(Boolean(data.hasMoreArchivedRecords));
+      }
+
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        console.error('Attendance records function error:', error);
+        if (append) {
+          setLoadMoreError(
+            error?.message || 'Unable to load more attendance records.'
           );
-          showLoadedRecords(
-            linkedRecords,
-            data.sessions || [],
-            userCanViewAttendanceArchive ? data.archivedRecords || [] : []
+        } else {
+          setSummariesError(
+            error?.message || 'Unable to load attendance records.'
           );
-          setStatus('');
-          return;
         }
       }
-
-      if (!isLocalHost()) {
-        const data = await response.json().catch(() => null);
-        setStatus(data?.error || 'Unable to load attendance records.');
-        return;
-      }
-    } catch (error) {
-      if (!isLocalHost()) {
-        console.error('Attendance records function error:', error);
-        setStatus('Unable to load attendance records.');
-        return;
-      }
-
-      console.warn('Attendance records function unavailable locally, using direct Supabase query.');
-    }
-
-    const selectAttendanceRecords = (archiveMode) => {
-      let query = supabase
-        .from('attendance_records')
-        .select(`
-          *,
-          training_sessions (*)
-        `)
-        .order('signed_at', { ascending: false });
-
-      if (archiveMode === 'active') {
-        query = query.is('archived_at', null);
-      } else if (archiveMode === 'archived') {
-        query = query.not('archived_at', 'is', null);
-      }
-
-      return query;
-    };
-
-    let archiveColumnsAvailable = true;
-    let result = await selectAttendanceRecords('active');
-
-    if (isMissingArchiveColumn(result.error)) {
-      archiveColumnsAvailable = false;
-      result = await selectAttendanceRecords('all');
-    }
-
-    if (result.error) {
-      console.error(result.error);
-      setStatus(result.error.message);
-      return;
-    }
-
-    let archivedResult = { data: [], error: null };
-
-    if (archiveColumnsAvailable && userCanViewAttendanceArchive) {
-      archivedResult = await selectAttendanceRecords('archived');
-
-      if (archivedResult.error) {
-        console.error(archivedResult.error);
-        setStatus(archivedResult.error.message);
-        return;
+    } finally {
+      if (summariesControllerRef.current === controller) {
+        summariesControllerRef.current = null;
+        setSummariesLoading(false);
+        setLoadMoreLoading('');
       }
     }
-
-    setAttendanceArchiveColumnsAvailable(archiveColumnsAvailable);
-
-    const loadedRecords = filterRecordsByAttendanceAccess(result.data || [], user);
-    const loadedArchivedRecords = filterRecordsByAttendanceAccess(
-      userCanViewAttendanceArchive ? archivedResult.data || [] : [],
-      user
-    );
-
-    const allSessionsResult = await supabase
-      .from('training_sessions')
-      .select('*')
-      .order('training_date', { ascending: false })
-      .order('created_at', { ascending: false });
-
-    if (allSessionsResult.error) {
-      console.error(allSessionsResult.error);
-      setStatus(allSessionsResult.error.message);
-      return;
-    }
-
-    const activeSessionIds = new Set(
-      loadedRecords
-        .map((record) => record.training_session_id)
-        .filter(Boolean)
-    );
-    const loadedSessions = filterSessionsByAttendanceAccess(
-      allSessionsResult.data || [],
-      user
-    ).filter((session) => activeSessionIds.has(session.id));
-
-    const sessionIds = getUniqueSessionIds(loadedRecords);
-    const recordsMissingSessions = loadedRecords.some(
-      (record) => record.training_session_id && !record.training_sessions
-    );
-
-    if (sessionIds.length > 0 && recordsMissingSessions) {
-      const sessionsResult = await supabase
-        .from('training_sessions')
-        .select('*')
-        .in('id', sessionIds);
-
-      if (sessionsResult.error) {
-        console.error(sessionsResult.error);
-        showLoadedRecords(
-          applyQuizCompletionToRecords(
-            loadedRecords,
-            await loadLinkedQuizAttemptsForRecords(loadedRecords)
-          ),
-          loadedSessions
-        );
-        setStatus(sessionsResult.error.message);
-        return;
-      }
-
-      showLoadedRecords(
-        applyQuizCompletionToRecords(
-          mergeRecordSessions(loadedRecords, sessionsResult.data || []),
-          await loadLinkedQuizAttemptsForRecords(loadedRecords)
-        ),
-        loadedSessions,
-        mergeRecordSessions(loadedArchivedRecords, sessionsResult.data || [])
-      );
-      setStatus('');
-      return;
-    }
-
-    showLoadedRecords(
-      applyQuizCompletionToRecords(
-        loadedRecords,
-        await loadLinkedQuizAttemptsForRecords(loadedRecords)
-      ),
-      loadedSessions,
-      loadedArchivedRecords
-    );
-    setStatus('');
   }
 
   async function deleteRecord(record) {
@@ -1212,7 +1246,7 @@ export default function AdminRecords() {
       return;
     }
 
-    if (group.records.length === 0) {
+    if ((group.session?.student_count ?? group.records.length) === 0) {
       setStatus('No students found for this session.');
       return;
     }
@@ -1263,7 +1297,7 @@ export default function AdminRecords() {
       return;
     }
 
-    if (group.records.length === 0) {
+    if ((group.session?.student_count ?? group.records.length) === 0) {
       setStatus('No students found for this session.');
       return;
     }
@@ -1347,15 +1381,19 @@ export default function AdminRecords() {
   async function downloadClassArchivePdf(group) {
     if (group.id === 'unassigned' || !group.session) return;
 
-    if (group.records.length === 0) {
-      setStatus('No attendance records to archive.');
-      return;
-    }
-
     setStatus('');
     setArchivingClassId(group.id);
 
     try {
+      const recordsToArchive = group.records.length > 0
+        ? group.records
+        : await fetchStudents(group.id, false, true);
+
+      if (recordsToArchive.length === 0) {
+        setStatus('No attendance records to archive.');
+        return;
+      }
+
       const { session } = group;
       const doc = new jsPDF({
         orientation: 'landscape',
@@ -1366,7 +1404,7 @@ export default function AdminRecords() {
       const tableRows = [];
       const tableImages = [];
 
-      for (const record of group.records) {
+      for (const record of recordsToArchive) {
         const photoImage = await downloadArchiveImage(
           'attendance-photos',
           record.photo_path,
@@ -1398,7 +1436,7 @@ export default function AdminRecords() {
       }
       const classInfoRows = getClassInfoRows(
         session,
-        group.records.length,
+        recordsToArchive.length,
         generatedAt
       );
 
@@ -1411,7 +1449,7 @@ export default function AdminRecords() {
       doc.setFontSize(10);
       doc.setFont(undefined, 'normal');
       doc.text(`Generated date/time: ${generatedAt}`, 40, 64);
-      doc.text(`Total number of records: ${group.records.length}`, 40, 80);
+      doc.text(`Total number of records: ${recordsToArchive.length}`, 40, 80);
 
       autoTable(doc, {
         startY: 100,
@@ -1537,20 +1575,24 @@ export default function AdminRecords() {
   async function downloadClassArchiveExcel(group) {
     if (group.id === 'unassigned' || !group.session) return;
 
-    if (group.records.length === 0) {
-      setStatus('No attendance records to archive.');
-      return;
-    }
-
     setStatus('');
     setArchivingClassExcelId(group.id);
 
     try {
+      const recordsToArchive = group.records.length > 0
+        ? group.records
+        : await fetchStudents(group.id, false, true);
+
+      if (recordsToArchive.length === 0) {
+        setStatus('No attendance records to archive.');
+        return;
+      }
+
       const { session } = group;
       const generatedAt = new Date().toLocaleString();
       const classInfoRows = getClassInfoRows(
         session,
-        group.records.length,
+        recordsToArchive.length,
         generatedAt
       );
       const workbook = new ExcelJS.Workbook();
@@ -1561,7 +1603,7 @@ export default function AdminRecords() {
       classInfoSheet.columns = [{ width: 30 }, { width: 90 }];
       classInfoSheet.addRow(['Attendance Class Archive']);
       classInfoSheet.addRow(['Generated date/time', generatedAt]);
-      classInfoSheet.addRow(['Total number of records', group.records.length]);
+      classInfoSheet.addRow(['Total number of records', recordsToArchive.length]);
       classInfoSheet.addRow([]);
       classInfoSheet.addRow(['Class Information', '']);
       classInfoRows.forEach((row) => classInfoSheet.addRow(row));
@@ -1597,7 +1639,7 @@ export default function AdminRecords() {
         fgColor: { argb: 'FF036F5E' },
       };
 
-      for (const record of group.records) {
+      for (const record of recordsToArchive) {
         const photoImage = await downloadArchiveImage(
           'attendance-photos',
           record.photo_path,
@@ -1680,7 +1722,11 @@ export default function AdminRecords() {
       loadRecords();
     }, 0);
 
-    return () => window.clearTimeout(timerId);
+    return () => {
+      window.clearTimeout(timerId);
+      requestGenerationRef.current += 1;
+      abortPendingRequests();
+    };
     // Admin records intentionally load once when the page opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1715,24 +1761,38 @@ export default function AdminRecords() {
         </div>
 
         <div className="admin-actions">
-          <button type="button" className="secondary-button" onClick={loadRecords}>
+          <button type="button" className="secondary-button" onClick={() => loadRecords()}>
             Refresh
           </button>
         </div>
       </div>
 
+      {summariesLoading && <p className="status">Loading records...</p>}
+
+      {summariesError && <p className="status" role="alert">{summariesError}</p>}
+
       {(status || photoModalError) && (
         <p className="status">{status || photoModalError}</p>
       )}
 
-      {!status && groupedRecords.length === 0 && (
+      {!summariesLoading && !summariesError && groupedRecords.length === 0 && (
         <p className="muted">No attendance records found yet.</p>
       )}
 
       {groupedRecords.length > 0 && (
         <div className="session-records-list">
           {groupedRecords.map((group) => {
-            const isExpanded = expandedSessionIds.has(group.id);
+            const groupKey = getStudentGroupKey(group.id, false);
+            const isExpanded = expandedSessionIds.has(groupKey);
+            const loadState = {
+              status: studentsLoadingByRecordId[groupKey]
+                ? 'loading'
+                : studentsErrorByRecordId[groupKey]
+                  ? 'error'
+                  : '',
+              error: studentsErrorByRecordId[groupKey] || '',
+            };
+            const studentsRegionId = `students-${group.id}`;
             const classTitle = group.title || getSessionValue(group.session, 'course_name');
 
             return (
@@ -1747,11 +1807,16 @@ export default function AdminRecords() {
                   <button
                     type="button"
                     className="secondary-button session-expand-button"
-                    onClick={() => toggleSessionExpanded(group.id)}
+                    onClick={() => toggleStudents(group.id, false)}
                     aria-expanded={isExpanded}
-                    aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${classTitle}`}
+                    aria-controls={studentsRegionId}
+                    disabled={loadState.status === 'loading'}
                   >
-                    <span aria-hidden="true">{isExpanded ? 'v' : '>'}</span>
+                    {loadState.status === 'loading'
+                      ? 'Loading Students...'
+                      : isExpanded
+                        ? 'Hide Students ↑'
+                        : 'Show Students ↓'}
                   </button>
                   <h3>{classTitle}</h3>
                 </div>
@@ -1799,7 +1864,7 @@ export default function AdminRecords() {
                             }}
                             disabled={
                               !assetAccess.certificateTemplate ||
-                              group.records.length === 0 ||
+                              getStudentCount(group.session, group.records) === 0 ||
                               generatingCertificatesId === group.id
                             }
                             title={
@@ -1822,7 +1887,7 @@ export default function AdminRecords() {
                             }}
                             disabled={
                               !assetAccess.walletCards ||
-                              group.records.length === 0 ||
+                              getStudentCount(group.session, group.records) === 0 ||
                               generatingWalletCardsId === group.id
                             }
                             title={
@@ -1889,8 +1954,6 @@ export default function AdminRecords() {
                 </div>
               </div>
 
-              {isExpanded && (
-                <>
               <dl className="session-meta">
                 <div>
                   <dt>Course Name</dt>
@@ -1947,18 +2010,46 @@ export default function AdminRecords() {
                   <dd>
                     <TrainerSignaturePreview
                       session={group.session}
-                      onError={handleMediaLoadError}
+                      signatureUrl={trainerSignatureUrlsByRecordId[group.id] || ''}
+                      isLoading={Boolean(
+                        trainerSignatureLoadingByRecordId[group.id]
+                      )}
+                      error={trainerSignatureErrorByRecordId[group.id] || ''}
+                      onLoad={() => loadTrainerSignature(group.session)}
+                      onImageError={() =>
+                        handleTrainerSignatureImageError(group.session)
+                      }
                     />
                   </dd>
                 </div>
 
                 <div>
                   <dt>Total Students</dt>
-                  <dd>{group.records.length}</dd>
+                  <dd>{getStudentCount(group.session, group.records)}</dd>
                 </div>
               </dl>
 
-              <div className="table-wrap">
+              {loadState.status === 'loading' && (
+                <p className="muted student-load-status" role="status">
+                  Loading students...
+                </p>
+              )}
+
+              {loadState.status === 'error' && (
+                <div className="student-load-error" role="alert">
+                  <span>{loadState.error}</span>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => toggleStudents(group.id, false)}
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+
+              {isExpanded && (
+              <div className="table-wrap" id={studentsRegionId}>
                 <div className="quiz-status-legend" aria-label="Quiz completion legend">
                   <span>
                     <span className="quiz-status-icon quiz-completed" aria-hidden="true">
@@ -2082,13 +2173,32 @@ export default function AdminRecords() {
                   </tbody>
                 </table>
               </div>
-                </>
               )}
             </section>
             );
           })}
         </div>
       )}
+
+      {hasMoreRecords && (
+        <div className="load-more-records">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => loadRecords({
+              page: recordsPage + 1,
+              nextArchivePage: archivePage,
+              scope: 'active',
+              append: true,
+            })}
+            disabled={loadMoreLoading === 'active'}
+          >
+            {loadMoreLoading === 'active' ? 'Loading...' : 'Load More Records'}
+          </button>
+        </div>
+      )}
+
+      {loadMoreError && <p className="status" role="alert">{loadMoreError}</p>}
 
       {canViewAttendanceArchive && (
         <section className="session-records-list">
@@ -2105,7 +2215,17 @@ export default function AdminRecords() {
             <p className="muted">No archived attendance records.</p>
           ) : (
             groupedArchivedRecords.map((group) => {
-              const isExpanded = expandedSessionIds.has(group.id);
+              const groupKey = getStudentGroupKey(group.id, true);
+              const isExpanded = expandedSessionIds.has(groupKey);
+              const loadState = {
+                status: studentsLoadingByRecordId[groupKey]
+                  ? 'loading'
+                  : studentsErrorByRecordId[groupKey]
+                    ? 'error'
+                    : '',
+                error: studentsErrorByRecordId[groupKey] || '',
+              };
+              const studentsRegionId = `archived-students-${group.id}`;
               const classTitle = group.title || getSessionValue(group.session, 'course_name');
 
               return (
@@ -2122,11 +2242,16 @@ export default function AdminRecords() {
                       <button
                         type="button"
                         className="secondary-button session-expand-button"
-                        onClick={() => toggleSessionExpanded(group.id)}
+                        onClick={() => toggleStudents(group.id, true)}
                         aria-expanded={isExpanded}
-                        aria-label={`${isExpanded ? 'Collapse' : 'Expand'} archived ${classTitle}`}
+                        aria-controls={studentsRegionId}
+                        disabled={loadState.status === 'loading'}
                       >
-                        <span aria-hidden="true">{isExpanded ? 'v' : '>'}</span>
+                        {loadState.status === 'loading'
+                          ? 'Loading Students...'
+                          : isExpanded
+                            ? 'Hide Students ↑'
+                            : 'Show Students ↓'}
                       </button>
                       <h3>{classTitle}</h3>
                     </div>
@@ -2145,8 +2270,6 @@ export default function AdminRecords() {
                     </div>
                   </div>
 
-                  {isExpanded && (
-                    <>
                       <dl className="session-meta">
                         <div>
                           <dt>Course Name</dt>
@@ -2203,18 +2326,50 @@ export default function AdminRecords() {
                           <dd>
                             <TrainerSignaturePreview
                               session={group.session}
-                              onError={handleMediaLoadError}
+                              signatureUrl={
+                                trainerSignatureUrlsByRecordId[group.id] || ''
+                              }
+                              isLoading={Boolean(
+                                trainerSignatureLoadingByRecordId[group.id]
+                              )}
+                              error={
+                                trainerSignatureErrorByRecordId[group.id] || ''
+                              }
+                              onLoad={() => loadTrainerSignature(group.session)}
+                              onImageError={() =>
+                                handleTrainerSignatureImageError(group.session)
+                              }
                             />
                           </dd>
                         </div>
 
                         <div>
                           <dt>Total Students</dt>
-                          <dd>{group.records.length}</dd>
+                          <dd>{getStudentCount(group.session, group.records)}</dd>
                         </div>
                       </dl>
 
-                      <div className="table-wrap">
+                      {loadState.status === 'loading' && (
+                        <p className="muted student-load-status" role="status">
+                          Loading students...
+                        </p>
+                      )}
+
+                      {loadState.status === 'error' && (
+                        <div className="student-load-error" role="alert">
+                          <span>{loadState.error}</span>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={() => toggleStudents(group.id, true)}
+                          >
+                            Retry
+                          </button>
+                        </div>
+                      )}
+
+                      {isExpanded && (
+                      <div className="table-wrap" id={studentsRegionId}>
                         <table>
                           <thead>
                             <tr>
@@ -2229,6 +2384,13 @@ export default function AdminRecords() {
                           </thead>
 
                           <tbody>
+                            {group.records.length === 0 && (
+                              <tr>
+                                <td colSpan="7" className="muted">
+                                  No students found for this class.
+                                </td>
+                              </tr>
+                            )}
                             {group.records.map((record) => (
                               <tr key={record.id}>
                                 <td>{record.student_name}</td>
@@ -2263,11 +2425,30 @@ export default function AdminRecords() {
                           </tbody>
                         </table>
                       </div>
-                    </>
                   )}
                 </section>
               );
             })
+          )}
+
+          {hasMoreArchivedRecords && (
+            <div className="load-more-records">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => loadRecords({
+                  page: recordsPage,
+                  nextArchivePage: archivePage + 1,
+                  scope: 'archived',
+                  append: true,
+                })}
+                disabled={loadMoreLoading === 'archived'}
+              >
+                {loadMoreLoading === 'archived'
+                  ? 'Loading...'
+                  : 'Load More Archived Records'}
+              </button>
+            </div>
           )}
         </section>
       )}

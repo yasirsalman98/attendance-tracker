@@ -424,10 +424,6 @@ button:disabled {
   margin-bottom: 16px;
 }
 
-.session-record-card-collapsed .session-record-top-row {
-  margin-bottom: 0;
-}
-
 .session-record-title-row {
   display: flex;
   align-items: center;
@@ -444,13 +440,48 @@ button:disabled {
 }
 
 .session-expand-button {
-  width: 36px;
-  min-width: 36px;
+  min-width: 150px;
   height: 36px;
-  padding: 0;
+  padding: 0 12px;
   border-radius: 7px;
   font-size: 16px;
   line-height: 1;
+}
+
+.student-load-status {
+  margin: 4px 0 0;
+}
+
+.student-load-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+  padding: 12px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.trainer-signature-error {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: #991b1b;
+}
+
+.trainer-signature-retry {
+  padding: 5px 9px;
+  font-size: 13px;
+}
+
+.load-more-records {
+  display: flex;
+  justify-content: center;
+  margin-top: 20px;
 }
 
 .session-card-actions {

@@ -61,6 +61,7 @@ test('frontend rejects stale endpoints and isolates trainer errors from summarie
   const trainerFlow = pageSource.slice(trainerStart, trainerEnd);
 
   assert.match(pageSource, /attendance-archive-v3/);
+  assert.doesNotMatch(pageSource, /attendance-lazy-v2/);
   assert.match(trainerFlow, /setTrainerSignatureErrorByRecordId/);
   assert.doesNotMatch(trainerFlow, /setSummariesError|setStatus/);
   assert.match(pageSource, /finally\s*{/);

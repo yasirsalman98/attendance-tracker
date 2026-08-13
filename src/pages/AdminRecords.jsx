@@ -696,7 +696,7 @@ export default function AdminRecords() {
           );
           const data = await response.json().catch(() => null);
 
-          if (response.ok && data?.responseVersion !== 'attendance-lazy-v2') {
+          if (response.ok && data?.responseVersion !== 'attendance-archive-v3') {
             throw new Error('The optimized attendance endpoint is not deployed.');
           }
 

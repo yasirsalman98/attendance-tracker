@@ -16,3 +16,6 @@
 
 [functions."quiz-archive-cleanup"]
   schedule = "@daily"
+
+[context.production.environment]
+  HISTORICAL_CLASS_WRITES_ENABLED = "true"

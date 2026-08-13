@@ -11,6 +11,7 @@ import {
 import AttendanceForm from './pages/AttendanceForm';
 import AdminRecords from './pages/AdminRecords';
 import CreateTrainingSession from './pages/CreateTrainingSession';
+import CreateHistoricalClass from './pages/CreateHistoricalClass';
 import CreateQuiz from './pages/CreateQuiz';
 import InstructorDashboard from './pages/InstructorDashboard';
 import Login from './pages/Login';
@@ -19,12 +20,13 @@ import QuizResults from './pages/QuizResults';
 import Settings from './pages/Settings';
 import StudentQuiz from './pages/StudentQuiz';
 import { supabase } from './supabaseClient';
-import { isSettingsAdminUser } from './userFeatureAccess';
+import { canCreateHistoricalClass, isSettingsAdminUser } from './userFeatureAccess';
 import './App.css';
 
 const protectedPaths = [
   '/instructor-7392',
   '/create-session-7392',
+  '/create-historical-class-7392',
   '/quizzes-7392',
   '/create-quiz-7392',
   '/records-7392',
@@ -83,6 +85,15 @@ function SettingsRoute({ session, isAuthLoading }) {
   }
 
   return <Settings />;
+}
+
+function HistoricalClassRoute({ session, isAuthLoading }) {
+  if (isAuthLoading) return <LoadingPage />;
+  if (!session) return <Navigate to="/login" replace />;
+  if (!canCreateHistoricalClass(session.user)) {
+    return <Navigate to="/instructor-7392" replace />;
+  }
+  return <CreateHistoricalClass session={session} />;
 }
 
 function AppShell() {
@@ -185,7 +196,7 @@ function AppShell() {
             path="/instructor-7392"
             element={
               <ProtectedRoute session={session} isAuthLoading={isAuthLoading}>
-                <InstructorDashboard />
+                <InstructorDashboard session={session} />
               </ProtectedRoute>
             }
           />
@@ -203,6 +214,15 @@ function AppShell() {
               <ProtectedRoute session={session} isAuthLoading={isAuthLoading}>
                 <CreateTrainingSession />
               </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/create-historical-class-7392"
+            element={
+              <HistoricalClassRoute
+                session={session}
+                isAuthLoading={isAuthLoading}
+              />
             }
           />
           <Route

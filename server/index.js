@@ -12,6 +12,7 @@ import PizZip from 'pizzip';
 import JSZip from 'jszip';
 import { handler as instructorUsersHandler } from '../netlify/functions/instructor-users.js';
 import { handler as attendanceRecordsHandler } from '../netlify/functions/attendance-records.js';
+import { handler as historicalClassHandler } from '../netlify/functions/historical-class.js';
 import { handler as certificatesSessionHandler } from '../netlify/functions/certificates-session.js';
 import { handler as savedQuizLibraryHandler } from '../netlify/functions/saved-quiz-library.js';
 import { handler as uploadClassPdfHandler } from '../netlify/functions/upload-class-pdf.js';
@@ -1378,6 +1379,15 @@ app.all('/.netlify/functions/wallet-cards-session', async (request, response) =>
     response.status(500).json({
       error: error?.message || 'Unable to run wallet cards function locally.',
     });
+  }
+});
+
+app.all('/.netlify/functions/historical-class', async (request, response) => {
+  try {
+    await runLocalNetlifyFunction(request, response, historicalClassHandler);
+  } catch (error) {
+    console.error('Local historical-class function error:', error?.name || 'request_failed');
+    response.status(500).json({ error: 'Unable to run historical class function.' });
   }
 });
 

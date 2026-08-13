@@ -12,6 +12,10 @@ export function isSettingsAdminUser(user) {
   return normalizeEmail(user?.email) === SETTINGS_ADMIN_EMAIL;
 }
 
+export function canCreateHistoricalClass(user) {
+  return isSettingsAdminUser(user);
+}
+
 export function getImportedAssets(user) {
   return user?.user_metadata?.imported_assets || {};
 }

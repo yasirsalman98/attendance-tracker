@@ -9,6 +9,13 @@ import {
   loadStudentsWithCache,
   replaceSessionRecords,
 } from './adminRecordsLazy';
+import {
+  archiveLocalHistoricalStudent,
+  getLocalHistoricalClass,
+  getLocalHistoricalClasses,
+  getLocalHistoricalStudentArchives,
+  restoreLocalHistoricalStudent,
+} from '../historicalClassLocalService';
 
 const SHAREPOINT_ARCHIVE_EMAILS = new Set([
   'excourse7233@gmail.com',
@@ -20,6 +27,15 @@ const ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE =
 
 function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function mergeLocalHistoricalSessions(remoteSessions) {
+  const localSessions = getLocalHistoricalClasses();
+  const localIds = new Set(localSessions.map((session) => session.id));
+  return [
+    ...localSessions,
+    ...(remoteSessions || []).filter((session) => !localIds.has(session.id)),
+  ];
 }
 
 function normalizeComparableText(value) {
@@ -522,6 +538,18 @@ function TrainerSignaturePreview({
   onLoad,
   onImageError,
 }) {
+  const directSignatureUrl = session?.trainer_signature_url || '';
+
+  if (directSignatureUrl) {
+    return (
+      <img
+        src={directSignatureUrl}
+        alt="Trainer signature"
+        className="signature-preview"
+      />
+    );
+  }
+
   if (!session?.trainer_signature_path) return 'N/A';
 
   if (signatureUrl) {
@@ -810,10 +838,11 @@ export default function AdminRecords() {
 
       try {
         const accessToken = await getAccessToken();
+        const localHistoricalClass = getLocalHistoricalClass(sessionId);
         const query = new URLSearchParams({
           view: 'students',
-          sessionId,
-          archived: String(archived),
+          sessionId: localHistoricalClass?.source_session_id || sessionId,
+          archived: String(localHistoricalClass ? false : archived),
         });
         if (archived) query.set('archiveType', archiveType);
         const response = await fetchWithTimeout(
@@ -834,10 +863,28 @@ export default function AdminRecords() {
           throw new Error(data?.error || 'Unable to load students.');
         }
 
-        const nextRecords = applyQuizCompletionToRecords(
+        let nextRecords = applyQuizCompletionToRecords(
           data.records,
           data.quizAttempts || []
         );
+        if (localHistoricalClass) {
+          const selectedIds = new Set(
+            archived
+              ? (localHistoricalClass.local_archived_students || [])
+                  .map((item) => item.source_attendance_id)
+              : localHistoricalClass.selected_source_attendance_ids || []
+          );
+          nextRecords = nextRecords
+            .filter((record) => selectedIds.has(record.id))
+            .map((record) => ({
+              ...record,
+              id: `${sessionId}:${record.id}`,
+              training_session_id: sessionId,
+              source_attendance_id: record.id,
+              training_sessions: localHistoricalClass,
+              is_local_historical_test: true,
+            }));
+        }
         if (generation === requestGenerationRef.current) {
           const setTargetRecords = archived
             ? archiveType === 'student'
@@ -1047,7 +1094,9 @@ export default function AdminRecords() {
       }
 
       if (scope !== 'archived') {
-        setSessions((current) => append ? [...current, ...data.sessions] : data.sessions);
+        setSessions((current) => mergeLocalHistoricalSessions(
+          append ? [...current, ...data.sessions] : data.sessions
+        ));
         setRecordsPage(page);
         setHasMoreRecords(Boolean(data.hasMoreRecords));
       }
@@ -1057,7 +1106,10 @@ export default function AdminRecords() {
         setArchivedSessions((current) =>
           append ? [...current, ...nextArchivedSessions] : nextArchivedSessions
         );
-        const nextStudentArchives = data.studentArchives || [];
+        const nextStudentArchives = [
+          ...getLocalHistoricalStudentArchives(),
+          ...(data.studentArchives || []),
+        ];
         setStudentArchives((current) =>
           append ? [...current, ...nextStudentArchives] : nextStudentArchives
         );
@@ -1089,7 +1141,9 @@ export default function AdminRecords() {
 
   async function deleteRecord(record) {
     const confirmed = window.confirm(
-      `Archive attendance record for ${record.student_name}? It will stay in Attendance Archive for 30 days before it can be permanently deleted.`
+      record.is_local_historical_test
+        ? `Archive ${record.student_name} from this private local test class?`
+        : `Archive attendance record for ${record.student_name}? It will stay in Attendance Archive for 30 days before it can be permanently deleted.`
     );
 
     if (!confirmed) {
@@ -1100,6 +1154,19 @@ export default function AdminRecords() {
     setStatus('');
 
     try {
+      if (record.is_local_historical_test) {
+        archiveLocalHistoricalStudent(
+          record.training_session_id,
+          record.source_attendance_id
+        );
+        studentCacheRef.current.delete(
+          getStudentGroupKey(record.training_session_id, false)
+        );
+        await loadRecords();
+        setStatus('Private local attendance record archived.');
+        return;
+      }
+
       if (attendanceArchiveColumnsAvailable === false) {
         setStatus(ATTENDANCE_ARCHIVE_MIGRATION_MESSAGE);
         return;
@@ -1153,6 +1220,19 @@ export default function AdminRecords() {
     setStatus('');
 
     try {
+      if (record.is_local_historical_test) {
+        restoreLocalHistoricalStudent(
+          record.training_session_id,
+          record.source_attendance_id
+        );
+        studentCacheRef.current.delete(
+          getStudentGroupKey(`student:${record.training_session_id}`, true)
+        );
+        await loadRecords();
+        setStatus('Private local attendance record restored.');
+        return;
+      }
+
       const accessToken = await getAccessToken();
       const response = await fetch(getAttendanceRecordsUrl(), {
         method: 'PATCH',
@@ -1883,10 +1963,13 @@ export default function AdminRecords() {
                         : 'Show Students ↓'}
                   </button>
                   <h3>{classTitle}</h3>
+                  {group.session?.is_local_historical_test && (
+                    <span className="local-historical-test-label">Private local test</span>
+                  )}
                 </div>
 
                 <div className="session-card-actions">
-                  {group.id !== 'unassigned' && (
+                  {group.id !== 'unassigned' && !group.session?.is_local_historical_test && (
                     <div className="session-actions-menu">
                       <button
                         type="button"
@@ -2214,7 +2297,7 @@ export default function AdminRecords() {
                           />
                         </td>
                         <td>
-                          {canManageAttendanceRecords ||
+                          {record.is_local_historical_test || canManageAttendanceRecords ||
                           shouldArchiveToSharePoint ||
                           record.training_sessions?.owner_user_id === currentUserId ? (
                             <button
@@ -2223,7 +2306,8 @@ export default function AdminRecords() {
                               onClick={() => deleteRecord(record)}
                               disabled={
                                 deletingId === record.id ||
-                                attendanceArchiveColumnsAvailable === false
+                                (!record.is_local_historical_test &&
+                                  attendanceArchiveColumnsAvailable === false)
                               }
                             >
                               {deletingId === record.id ? 'Archiving...' : 'Archive'}

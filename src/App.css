@@ -431,6 +431,17 @@ button:disabled {
   min-width: 0;
 }
 
+.local-historical-test-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #fff1c2;
+  color: #6b4f00;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
 .session-record-top-row h3 {
   margin: 0;
   color: #111827;

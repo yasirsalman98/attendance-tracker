@@ -10,13 +10,6 @@ function formatDate(value) {
   return date.toLocaleDateString();
 }
 
-function formatDuration(value) {
-  const minutes = Number(value);
-  if (!Number.isFinite(minutes) || minutes <= 0) return 'Not provided';
-
-  return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
-}
-
 function formatQuizStatus(quiz) {
   if (quiz.results_saved) return 'Saved Results';
   if (quiz.finalizing) return 'Finalizing';
@@ -91,7 +84,6 @@ function addQuizDetailsSheet(workbook, quiz, attempts, generatedAt) {
   sheet.addRow(['Instructor', quiz.instructor_name || 'Not provided']);
   sheet.addRow(['Class Date', formatDate(quiz.class_date)]);
   sheet.addRow(['Passing Score', `${quiz.passing_score ?? 0}%`]);
-  sheet.addRow(['Duration', formatDuration(quiz.quiz_duration_minutes)]);
   sheet.addRow(['Status', formatQuizStatus(quiz)]);
   sheet.addRow(['Total Questions', getSortedQuestions(quiz).length]);
   sheet.addRow(['Total Attempts', attempts.length]);

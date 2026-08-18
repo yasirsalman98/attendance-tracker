@@ -1224,36 +1224,6 @@
   grid-column: 1 / -1;
 }
 
-.quiz-countdown {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  margin: 16px 0;
-  padding: 14px 16px;
-  border: 1px solid #bfdbfe;
-  border-radius: 10px;
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-weight: 800;
-}
-
-.quiz-countdown strong {
-  color: #111827;
-  font-size: 1.35rem;
-  letter-spacing: 0;
-}
-
-.quiz-countdown.is-expired {
-  border-color: #fecaca;
-  background: #fef2f2;
-  color: #991b1b;
-}
-
-.quiz-countdown.is-expired strong {
-  color: #991b1b;
-}
-
 .quiz-student-card {
   max-width: 900px;
   margin: 0 auto;

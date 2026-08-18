@@ -46,10 +46,6 @@ function getStoredAttemptKey(quizId, attemptId) {
   return `excourse_quiz_attempt_${quizId}_${attemptId}`;
 }
 
-function getStoredQuizStartKey(quizId) {
-  return `excourse_quiz_started_${quizId}`;
-}
-
 function getStoredSubmissionKey(quizId) {
   return `excourse_quiz_submission_key_${quizId}`;
 }
@@ -89,48 +85,6 @@ function isMissingForceSubmitColumns(error) {
   return message.includes('force_submit') || message.includes('finalizing');
 }
 
-function formatRemainingTime(totalSeconds) {
-  const seconds = Math.max(0, Number(totalSeconds || 0));
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remainingSeconds = seconds % 60;
-  const paddedMinutes = String(minutes).padStart(hours ? 2 : 1, '0');
-  const paddedSeconds = String(remainingSeconds).padStart(2, '0');
-
-  return hours
-    ? `${hours}:${paddedMinutes}:${paddedSeconds}`
-    : `${paddedMinutes}:${paddedSeconds}`;
-}
-
-function getQuizRemainingSeconds(quiz) {
-  if (!quiz?.created_at) return null;
-
-  const startedAt = new Date(quiz.created_at).getTime();
-  const durationMinutes = Number(quiz.quiz_duration_minutes || 30);
-
-  if (
-    Number.isNaN(startedAt) ||
-    !Number.isFinite(durationMinutes) ||
-    durationMinutes <= 0
-  ) {
-    return null;
-  }
-
-  const deadline = startedAt + durationMinutes * 60 * 1000;
-
-  return Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-}
-
-async function finalizeExpiredQuizSession(quizId) {
-  const { error } = await supabase.rpc('finalize_expired_quiz_session', {
-    p_quiz_id: quizId,
-  });
-
-  if (error) {
-    console.warn('Unable to finalize expired quiz session:', error);
-  }
-}
-
 export default function StudentQuiz() {
   const { quizId: quizIdFromPath } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -146,8 +100,6 @@ export default function StudentQuiz() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [result, setResult] = useState(null);
   const [resultNotice, setResultNotice] = useState('');
-  const [remainingSeconds, setRemainingSeconds] = useState(null);
-  const [isTimeExpired, setIsTimeExpired] = useState(false);
   const [isSessionEnded, setIsSessionEnded] = useState(false);
   const submissionInFlightRef = useRef(false);
   const forcedSubmitTriggeredRef = useRef(false);
@@ -191,11 +143,9 @@ export default function StudentQuiz() {
             instructor_name,
             class_date,
             passing_score,
-            quiz_duration_minutes,
             is_active,
             results_saved,
             ${sessionLinkField}
-            created_at,
             quiz_questions (
               id,
               question_text,
@@ -222,16 +172,11 @@ export default function StudentQuiz() {
 
       if (!isActive) return;
 
-      const isExpired = data ? getQuizRemainingSeconds(data) === 0 : false;
-
-      if (error || !data || !data.is_active || data.results_saved || isExpired) {
+      if (error || !data || !data.is_active || data.results_saved) {
         console.error('Load quiz error:', error);
-        if (data?.id && isExpired) {
-          finalizeExpiredQuizSession(data.id);
-        }
         setQuiz(null);
         setLoadError(
-          data?.results_saved || data?.is_active === false || isExpired
+          data?.results_saved || data?.is_active === false
             ? 'This quiz session has ended.'
             : 'Invalid quiz link. Please use the link provided by your instructor.'
         );
@@ -295,7 +240,6 @@ export default function StudentQuiz() {
   }
 
   const validateSubmission = useCallback(function validateSubmission() {
-    if (isTimeExpired) return 'Time is up. This quiz can no longer be submitted.';
     if (!studentName.trim()) return 'Student name is required.';
     if (!studentEmail.trim()) return 'Student email is required.';
 
@@ -306,10 +250,10 @@ export default function StudentQuiz() {
     }
 
     return '';
-  }, [answers, isTimeExpired, orderedQuestions, studentEmail, studentName]);
+  }, [answers, orderedQuestions, studentEmail, studentName]);
 
   const submitQuiz = useCallback(
-    async function submitQuiz({ forced = false, reason = '' } = {}) {
+    async function submitQuiz({ forced = false } = {}) {
       if (!quiz || result || submissionInFlightRef.current) return;
 
       submissionInFlightRef.current = true;
@@ -470,17 +414,9 @@ export default function StudentQuiz() {
           getStoredAttemptKey(quiz.id, attempt.id),
           JSON.stringify(submittedResult)
         );
-        window.localStorage.removeItem(getStoredQuizStartKey(quiz.id));
-
-        if (reason === 'time_expired') {
-          await finalizeExpiredQuizSession(quiz.id);
-        }
-
         setResult(submittedResult);
         setResultNotice(
-          reason === 'time_expired'
-            ? 'Time is up. Your quiz was submitted automatically.'
-            : forced
+          forced
             ? 'The instructor ended the quiz. Your answers were submitted automatically.'
             : ''
         );
@@ -536,43 +472,6 @@ export default function StudentQuiz() {
     },
     [result, submitQuiz]
   );
-
-  useEffect(() => {
-    if (!quiz?.id || result) return undefined;
-
-    async function updateRemainingTime() {
-      const nextRemainingSeconds = getQuizRemainingSeconds(quiz);
-
-      if (nextRemainingSeconds === null) {
-        setRemainingSeconds(null);
-        return;
-      }
-
-      setRemainingSeconds(nextRemainingSeconds);
-
-      if (nextRemainingSeconds > 0) {
-        setIsTimeExpired(false);
-        return;
-      }
-
-      setIsTimeExpired(true);
-
-      if (forcedSubmitTriggeredRef.current || submissionInFlightRef.current) return;
-
-      forcedSubmitTriggeredRef.current = true;
-      setIsSessionEnded(true);
-      setStatus('Time is up. Submitting your quiz automatically...');
-      await submitQuiz({ forced: true, reason: 'time_expired' });
-    }
-
-    const immediateTimerId = window.setTimeout(updateRemainingTime, 0);
-    const timerId = window.setInterval(updateRemainingTime, 1000);
-
-    return () => {
-      window.clearTimeout(immediateTimerId);
-      window.clearInterval(timerId);
-    };
-  }, [quiz, result, submitQuiz]);
 
   useEffect(() => {
     if (!quiz?.id || result) return undefined;
@@ -840,13 +739,6 @@ export default function StudentQuiz() {
         </div>
       </dl>
 
-      {remainingSeconds !== null && (
-        <div className={`quiz-countdown ${isTimeExpired ? 'is-expired' : ''}`}>
-          <span>Time Remaining</span>
-          <strong>{formatRemainingTime(remainingSeconds)}</strong>
-        </div>
-      )}
-
       {quiz.quiz_description && <p className="muted">{quiz.quiz_description}</p>}
 
       {isSessionEnded && !result && (
@@ -863,7 +755,7 @@ export default function StudentQuiz() {
               type="text"
               value={studentName}
               onChange={(event) => setStudentName(event.target.value)}
-              disabled={isTimeExpired || isSessionEnded}
+              disabled={isSessionEnded}
             />
           </label>
 
@@ -873,7 +765,7 @@ export default function StudentQuiz() {
               type="email"
               value={studentEmail}
               onChange={(event) => setStudentEmail(event.target.value)}
-              disabled={isTimeExpired || isSessionEnded}
+              disabled={isSessionEnded}
             />
           </label>
         </div>
@@ -884,7 +776,7 @@ export default function StudentQuiz() {
             type="text"
             value={company}
             onChange={(event) => setCompany(event.target.value)}
-            disabled={isTimeExpired || isSessionEnded}
+            disabled={isSessionEnded}
           />
         </label>
 
@@ -901,7 +793,7 @@ export default function StudentQuiz() {
                     type={question.question_type === 'multiple_choice' ? 'checkbox' : 'radio'}
                     name={`student-answer-${question.id}`}
                     checked={(answers[question.id] || []).includes(choice.id)}
-                    disabled={isTimeExpired || isSessionEnded}
+                    disabled={isSessionEnded}
                     onChange={() => {
                       if (question.question_type === 'multiple_choice') {
                         toggleMultipleAnswer(question.id, choice.id);
@@ -917,7 +809,7 @@ export default function StudentQuiz() {
           ))}
         </div>
 
-        <button type="submit" disabled={isSubmitting || isTimeExpired || isSessionEnded}>
+        <button type="submit" disabled={isSubmitting || isSessionEnded}>
           {isSubmitting ? 'Submitting Quiz...' : 'Submit Quiz'}
         </button>
 

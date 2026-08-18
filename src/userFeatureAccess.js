@@ -1,8 +1,4 @@
 export const SETTINGS_ADMIN_EMAIL = 'excourse7233@gmail.com';
-const ADMIN_QUIZ_OWNER_EMAILS = new Set([
-  SETTINGS_ADMIN_EMAIL,
-  'excourse7233@exceedsafety.com',
-]);
 
 export function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
@@ -52,10 +48,4 @@ export function canLoadSavedQuizQuestions(user) {
 
 export function canDeleteSavedQuizResults(user) {
   return isSettingsAdminUser(user) || !isExCourseFeatureUser(user);
-}
-
-export function getSavedQuizDraftLabel(quiz) {
-  const ownerEmail = normalizeEmail(quiz?.owner_email);
-
-  return ownerEmail && !ADMIN_QUIZ_OWNER_EMAILS.has(ownerEmail) ? 'Copy' : 'Draft';
 }

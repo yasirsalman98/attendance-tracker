@@ -253,6 +253,43 @@ input {
   display: block;
 }
 
+.kiosk-mode-banner {
+  margin-bottom: 18px;
+  padding: 10px 14px;
+  border: 1px solid #99f6e4;
+  border-radius: 10px;
+  background: #f0fdfa;
+  color: #115e59;
+  font-weight: 800;
+  text-align: center;
+}
+
+.kiosk-confirmation {
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  min-height: 420px;
+  align-content: center;
+  text-align: center;
+}
+
+.kiosk-confirmation h2,
+.kiosk-confirmation p {
+  margin: 0;
+}
+
+.kiosk-confirmation-icon {
+  display: grid;
+  place-items: center;
+  width: 88px;
+  height: 88px;
+  border-radius: 999px;
+  background: #0f766e;
+  color: #ffffff;
+  font-size: 3rem;
+  font-weight: 900;
+}
+
 .signature-box-accepted {
   border-color: #036f5e;
   box-shadow: 0 0 0 3px rgba(3, 111, 94, 0.12);

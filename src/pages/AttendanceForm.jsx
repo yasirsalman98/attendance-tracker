@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import SignaturePad from 'signature_pad';
 import { supabase } from '../supabaseClient';
 
@@ -103,14 +103,19 @@ function formatTime(value) {
   });
 }
 
+const KIOSK_CONFIRMATION_MS = 3000;
+
 export default function AttendanceForm() {
   const { sessionId } = useParams();
+  const [searchParams] = useSearchParams();
+  const isKioskMode = searchParams.get('kiosk') === '1';
   const canvasRef = useRef(null);
   const signaturePadRef = useRef(null);
   const acceptedSignatureDataRef = useRef(null);
   const videoRef = useRef(null);
   const photoCanvasRef = useRef(null);
   const mediaStreamRef = useRef(null);
+  const kioskResetTimerRef = useRef(null);
 
   const [sessionDetails, setSessionDetails] = useState(null);
   const [isLoadingSession, setIsLoadingSession] = useState(Boolean(sessionId));
@@ -128,6 +133,7 @@ export default function AttendanceForm() {
   const [cameraError, setCameraError] = useState('');
   const [photoDataUrl, setPhotoDataUrl] = useState('');
   const [photoBlob, setPhotoBlob] = useState(null);
+  const [showKioskConfirmation, setShowKioskConfirmation] = useState(false);
   const isSessionExpired = isAttendanceLinkExpired(sessionDetails?.expires_at);
   const canSubmit =
     studentName.trim() &&
@@ -141,7 +147,12 @@ export default function AttendanceForm() {
     !isSubmitting;
 
   useEffect(() => {
-    if (!sessionId || !sessionDetails || isSessionExpired) {
+    if (
+      !sessionId ||
+      !sessionDetails ||
+      isSessionExpired ||
+      showKioskConfirmation
+    ) {
       return undefined;
     }
 
@@ -229,7 +240,7 @@ export default function AttendanceForm() {
       signaturePad.off();
       signaturePadRef.current = null;
     };
-  }, [sessionId, sessionDetails, isSessionExpired]);
+  }, [sessionId, sessionDetails, isSessionExpired, showKioskConfirmation]);
 
   useEffect(() => {
     if (isCameraOpen && videoRef.current && mediaStreamRef.current) {
@@ -242,6 +253,9 @@ export default function AttendanceForm() {
 
   useEffect(() => {
     return () => {
+      if (kioskResetTimerRef.current) {
+        window.clearTimeout(kioskResetTimerRef.current);
+      }
       stopCamera(false);
     };
   }, []);
@@ -523,9 +537,20 @@ export default function AttendanceForm() {
       clearSignature();
       setPhotoDataUrl('');
       setPhotoBlob(null);
+      setCameraError('');
       stopCamera();
 
-      setStatus('Attendance submitted successfully. / Asistencia enviada correctamente.');
+      if (isKioskMode) {
+        setStatus('');
+        setShowKioskConfirmation(true);
+        kioskResetTimerRef.current = window.setTimeout(() => {
+          setShowKioskConfirmation(false);
+          kioskResetTimerRef.current = null;
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }, KIOSK_CONFIRMATION_MS);
+      } else {
+        setStatus('Attendance submitted successfully. / Asistencia enviada correctamente.');
+      }
     } catch (error) {
       console.error(error);
       setStatus(error.message || 'Something went wrong. Please try again. / Algo salio mal. Intentelo de nuevo.');
@@ -563,9 +588,32 @@ export default function AttendanceForm() {
     );
   }
 
+  if (isKioskMode && showKioskConfirmation) {
+    return (
+      <section className="card kiosk-confirmation" role="status" aria-live="polite">
+        <div className="kiosk-confirmation-icon" aria-hidden="true">Done</div>
+        <h2>Attendance Confirmed / Asistencia confirmada</h2>
+        <p>
+          Your attendance was submitted successfully. / Su asistencia fue enviada
+          correctamente.
+        </p>
+        <p className="muted">
+          Preparing the form for the next student... / Preparando el formulario para
+          el siguiente estudiante...
+        </p>
+      </section>
+    );
+  }
+
   return (
     <section className="card">
       <h2>Student Attendance Form / Formulario de asistencia del estudiante</h2>
+
+      {isKioskMode && (
+        <div className="kiosk-mode-banner">
+          Shared Device Sign-In / Registro en dispositivo compartido
+        </div>
+      )}
 
       <dl className="attendance-session-details">
         <div>

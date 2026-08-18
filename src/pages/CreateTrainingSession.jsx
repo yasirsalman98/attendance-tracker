@@ -119,6 +119,7 @@ export default function CreateTrainingSession() {
 
   const [createdSession, setCreatedSession] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [copiedKioskLink, setCopiedKioskLink] = useState(false);
   const [hasTrainerSignature, setHasTrainerSignature] = useState(false);
   const [isTrainerSignatureAccepted, setIsTrainerSignatureAccepted] = useState(false);
   const [acceptedTrainerSignatureDataUrl, setAcceptedTrainerSignatureDataUrl] =
@@ -140,6 +141,11 @@ export default function CreateTrainingSession() {
 
     return `${window.location.origin}/attendance/session/${createdSession.id}`;
   }, [createdSession]);
+  const kioskSignInLink = useMemo(() => {
+    if (!studentSignInLink) return '';
+
+    return `${studentSignInLink}?kiosk=1`;
+  }, [studentSignInLink]);
 
   useEffect(() => {
     let isActive = true;
@@ -661,6 +667,20 @@ export default function CreateTrainingSession() {
     }
   }
 
+  async function handleCopyKioskLink() {
+    if (!kioskSignInLink) return;
+
+    try {
+      await navigator.clipboard.writeText(kioskSignInLink);
+      setCopiedKioskLink(true);
+    } catch (error) {
+      console.error('Copy shared-device sign-in link error:', error);
+      setErrorMessage(
+        'The session was created, but the shared-device link could not be copied.'
+      );
+    }
+  }
+
   function handleDownloadQrCode() {
     const canvas = qrCodeRef.current?.querySelector('canvas');
 
@@ -1011,7 +1031,30 @@ export default function CreateTrainingSession() {
                 </button>
               </div>
 
-              <p>Send this link to students or open it on the sign-in device.</p>
+              <p>Send this link to students or use it for the QR code.</p>
+            </div>
+
+            <div className="student-link-box kiosk-link-box">
+              <label htmlFor="kioskSignInLink">Shared Device Sign-In Link</label>
+
+              <div className="copy-row">
+                <input
+                  id="kioskSignInLink"
+                  type="text"
+                  value={kioskSignInLink}
+                  readOnly
+                />
+
+                <button type="button" onClick={handleCopyKioskLink}>
+                  {copiedKioskLink ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+
+              <p>
+                Open this link on a shared computer, tablet, or phone. After each
+                successful sign-in, it clears the student information and returns to
+                a fresh form.
+              </p>
             </div>
 
             <div className="qr-code-box">

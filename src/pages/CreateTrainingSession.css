@@ -432,6 +432,13 @@
   gap: 10px;
 }
 
+.kiosk-link-box {
+  padding: 18px;
+  border: 1px solid #99f6e4;
+  border-radius: 12px;
+  background: #f0fdfa;
+}
+
 .qr-code-box {
   display: grid;
   grid-template-columns: auto 1fr;

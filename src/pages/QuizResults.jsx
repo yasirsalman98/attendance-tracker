@@ -20,13 +20,6 @@ function formatDate(value) {
   return date.toLocaleDateString();
 }
 
-function formatDuration(value) {
-  const minutes = Number(value);
-  if (!Number.isFinite(minutes) || minutes <= 0) return 'Not provided';
-
-  return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
-}
-
 function formatQuestionCount(quiz) {
   const questionCount = quiz?.quiz_questions?.length || 0;
   return `${questionCount} ${questionCount === 1 ? 'question' : 'questions'}`;
@@ -523,10 +516,6 @@ export default function QuizResults() {
                   <div>
                     <dt>Passing Score</dt>
                     <dd>{selectedQuiz.passing_score}%</dd>
-                  </div>
-                  <div>
-                    <dt>Duration</dt>
-                    <dd>{formatDuration(selectedQuiz.quiz_duration_minutes)}</dd>
                   </div>
                   <div>
                     <dt>Questions</dt>

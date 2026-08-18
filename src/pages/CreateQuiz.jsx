@@ -5,7 +5,6 @@ import { supabase } from '../supabaseClient';
 import { getQuizResultSummary } from '../quizResultsUtils';
 import {
   canLoadSavedQuizQuestions,
-  getSavedQuizDraftLabel,
   isSettingsAdminUser,
 } from '../userFeatureAccess';
 import './Quiz.css';
@@ -24,53 +23,6 @@ function formatDate(value) {
   if (Number.isNaN(date.getTime())) return value;
 
   return date.toLocaleDateString();
-}
-
-function formatDuration(minutes) {
-  const duration = Number(minutes || 0);
-
-  if (duration === 1) return '1 minute';
-  if (duration < 60) return `${duration} minutes`;
-
-  const hours = Math.floor(duration / 60);
-  const remainingMinutes = duration % 60;
-  const hourLabel = hours === 1 ? '1 hour' : `${hours} hours`;
-
-  return remainingMinutes
-    ? `${hourLabel} ${remainingMinutes} min`
-    : hourLabel;
-}
-
-function formatRemainingTime(totalSeconds) {
-  const seconds = Math.max(0, Number(totalSeconds || 0));
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remainingSeconds = seconds % 60;
-  const paddedMinutes = String(minutes).padStart(hours ? 2 : 1, '0');
-  const paddedSeconds = String(remainingSeconds).padStart(2, '0');
-
-  return hours
-    ? `${hours}:${paddedMinutes}:${paddedSeconds}`
-    : `${paddedMinutes}:${paddedSeconds}`;
-}
-
-function getQuizRemainingSeconds(quiz) {
-  if (!quiz?.created_at) return null;
-
-  const startedAt = new Date(quiz.created_at).getTime();
-  const durationMinutes = Number(quiz.quiz_duration_minutes || 30);
-
-  if (
-    Number.isNaN(startedAt) ||
-    !Number.isFinite(durationMinutes) ||
-    durationMinutes <= 0
-  ) {
-    return null;
-  }
-
-  const deadline = startedAt + durationMinutes * 60 * 1000;
-
-  return Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
 }
 
 function delay(ms) {
@@ -486,15 +438,11 @@ export default function CreateQuiz() {
   const [liveQuizDetails, setLiveQuizDetails] = useState(null);
   const [liveAttempts, setLiveAttempts] = useState([]);
   const [liveResultsError, setLiveResultsError] = useState('');
-  const [liveRemainingSeconds, setLiveRemainingSeconds] = useState(null);
   const [savingResultsQuizId, setSavingResultsQuizId] = useState('');
   const [deletingSessionId, setDeletingSessionId] = useState('');
   const [canLoadSharedSavedQuizLibrary, setCanLoadSharedSavedQuizLibrary] =
     useState(false);
-  const [isSettingsAdmin, setIsSettingsAdmin] = useState(false);
   const lastScrolledQuizIdRef = useRef('');
-  const autoSaveExpiredQuizIdRef = useRef('');
-  const saveQuizResultsRef = useRef(null);
   const quizIdFromUrl = searchParams.get('quizId') || '';
   const editQuizIdFromUrl = searchParams.get('editQuizId') || '';
   const isEditingSavedQuiz = Boolean(editQuizIdFromUrl);
@@ -522,8 +470,6 @@ export default function CreateQuiz() {
     () => getQuizResultSummary(liveQuizForResults, liveAttempts),
     [liveAttempts, liveQuizForResults]
   );
-  saveQuizResultsRef.current = saveQuizResults;
-
   const loadAttendanceSessions = useCallback(async function loadAttendanceSessions() {
     setIsLoadingAttendanceSessions(true);
     setAttendanceSessionsError('');
@@ -868,21 +814,6 @@ export default function CreateQuiz() {
       return undefined;
     }
 
-    async function updateLiveCountdown() {
-      const nextRemainingSeconds = getQuizRemainingSeconds(createdQuiz);
-      setLiveRemainingSeconds(nextRemainingSeconds);
-
-      if (
-        nextRemainingSeconds === 0 &&
-        autoSaveExpiredQuizIdRef.current !== createdQuiz.id
-      ) {
-        autoSaveExpiredQuizIdRef.current = createdQuiz.id;
-        await saveQuizResultsRef.current?.(createdQuiz);
-      }
-    }
-
-    const countdownInitialLoadId = window.setTimeout(updateLiveCountdown, 0);
-    const countdownIntervalId = window.setInterval(updateLiveCountdown, 1000);
     const initialLoadId = window.setTimeout(() => {
       loadLiveSessionResults(createdQuiz.id);
     }, 0);
@@ -892,8 +823,6 @@ export default function CreateQuiz() {
     }, 3000);
 
     return () => {
-      window.clearTimeout(countdownInitialLoadId);
-      window.clearInterval(countdownIntervalId);
       window.clearTimeout(initialLoadId);
       window.clearInterval(intervalId);
     };
@@ -1020,14 +949,6 @@ export default function CreateQuiz() {
       return 'Passing score must be between 0 and 100.';
     }
 
-    if (
-      !Number.isFinite(Number(quizDurationMinutes)) ||
-      Number(quizDurationMinutes) < 1 ||
-      Number(quizDurationMinutes) > 500
-    ) {
-      return 'Countdown time must be between 1 and 500 minutes.';
-    }
-
     for (let questionIndex = 0; questionIndex < questions.length; questionIndex += 1) {
       const question = questions[questionIndex];
       const questionNumber = questionIndex + 1;
@@ -1070,7 +991,6 @@ export default function CreateQuiz() {
       const user = await getCurrentUser();
       const userCanLoadSharedSavedQuizLibrary = canLoadSavedQuizQuestions(user);
 
-      setIsSettingsAdmin(isSettingsAdminUser(user));
       setCanLoadSharedSavedQuizLibrary(userCanLoadSharedSavedQuizLibrary);
 
       const ownQuizzes = await fetchOwnSavedQuizzes(user);
@@ -1140,7 +1060,7 @@ export default function CreateQuiz() {
       });
 
       setCourseName(data.course_name || '');
-      setQuizTitle(data.quiz_title ? `${data.quiz_title} Copy` : '');
+      setQuizTitle(data.quiz_title || '');
       setQuizDescription(data.quiz_description || '');
       setInstructorName(data.instructor_name || '');
       setClassDate(data.class_date || getTodayDateValue());
@@ -1163,7 +1083,7 @@ export default function CreateQuiz() {
 
   function clearLoadedQuizQuestions() {
     const confirmed = window.confirm(
-      'Clear the loaded quiz questions and start a blank quiz draft? This will not delete any saved quizzes.'
+      'Clear the loaded quiz questions and start a blank quiz? This will not delete any saved quizzes.'
     );
 
     if (!confirmed) return;
@@ -1182,7 +1102,7 @@ export default function CreateQuiz() {
     setSearchParams({});
     setErrorMessage('');
     setDraftStatusMessage('');
-    setStatusMessage('Loaded questions cleared. You can start a new quiz draft.');
+    setStatusMessage('Loaded questions cleared. You can start a new quiz.');
   }
 
   async function saveQuiz({ publish }) {
@@ -1356,7 +1276,7 @@ export default function CreateQuiz() {
       } else {
         setSavedDraftId(quizTemplate.id);
         setSearchParams({});
-        setDraftStatusMessage('Draft saved. Students will not see it until you publish.');
+        setDraftStatusMessage('Quiz saved. Students will not see it until you publish.');
       }
     } catch (error) {
       console.error('Create quiz error:', error);
@@ -1855,7 +1775,6 @@ export default function CreateQuiz() {
                     <div className="active-quiz-meta">
                       <span>{formatDate(quiz.class_date)}</span>
                       <span>Passing: {quiz.passing_score}%</span>
-                      <span>Time: {formatDuration(quiz.quiz_duration_minutes || 30)}</span>
                     </div>
                   </div>
                   <div className="active-quiz-actions">
@@ -1902,7 +1821,6 @@ export default function CreateQuiz() {
                     savedQuizzes.map((quiz) => (
                       <option key={quiz.id} value={quiz.id}>
                         {quiz.course_name} - {quiz.quiz_title}
-                        {quiz.is_active ? '' : ` (${getSavedQuizDraftLabel(quiz)})`}
                       </option>
                     ))
                   )}
@@ -1995,18 +1913,6 @@ export default function CreateQuiz() {
                 />
               </div>
 
-              <div className="form-group">
-                <label htmlFor="quizDurationMinutes">Countdown Time *</label>
-                <input
-                  id="quizDurationMinutes"
-                  type="number"
-                  min="1"
-                  max="500"
-                  step="1"
-                  value={quizDurationMinutes}
-                  onChange={(event) => setQuizDurationMinutes(event.target.value)}
-                />
-              </div>
             </div>
 
             {!isEditingSavedQuiz && (
@@ -2221,13 +2127,7 @@ export default function CreateQuiz() {
                     onClick={() => saveQuiz({ publish: false })}
                     disabled={Boolean(savingAction)}
                   >
-                    {savingAction === 'draft'
-                      ? isSettingsAdmin
-                        ? 'Saving Draft...'
-                        : 'Saving Copy...'
-                      : isSettingsAdmin
-                        ? 'Save as Draft'
-                        : 'Save as Copy'}
+                    {savingAction === 'draft' ? 'Saving Quiz...' : 'Save Quiz'}
                   </button>
 
                   <button
@@ -2276,17 +2176,11 @@ export default function CreateQuiz() {
                   <dd>{createdQuiz.passing_score}%</dd>
                 </div>
                 <div>
-                  <dt>Time Limit</dt>
-                  <dd>{formatDuration(createdQuiz.quiz_duration_minutes || 30)}</dd>
-                </div>
-                <div className={liveRemainingSeconds === 0 ? 'is-expired' : ''}>
-                  <dt>Countdown</dt>
+                  <dt>Availability</dt>
                   <dd>
                     {createdQuiz.is_active === false
-                      ? 'Ended'
-                      : liveRemainingSeconds === null
-                        ? 'Calculating...'
-                        : formatRemainingTime(liveRemainingSeconds)}
+                      ? 'Ended by instructor'
+                      : 'Open until results are saved'}
                   </dd>
                 </div>
               </dl>
@@ -2437,7 +2331,7 @@ export default function CreateQuiz() {
                       : 'Save Quiz Results'}
                   </button>
                   <p className="live-results-action-note">
-                    Saves results and closes the student quiz link.
+                    Auto-submits open student quizzes, saves results, and closes the link.
                   </p>
                 </>
               )}

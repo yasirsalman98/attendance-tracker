@@ -167,25 +167,9 @@ before update on public.quiz_templates
 for each row
 execute function public.set_updated_at();
 
-create or replace function public.finalize_expired_quiz_session(p_quiz_id uuid)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  update public.quiz_templates
-  set
-    force_submit = true,
-    finalizing = true,
-    results_saved = true,
-    is_active = false,
-    is_saved_template = false
-  where id = p_quiz_id
-    and coalesce(results_saved, false) = false
-    and now() >= created_at + make_interval(mins => quiz_duration_minutes);
-end;
-$$;
+-- Published quizzes remain active until their instructor explicitly saves results.
+-- Remove the legacy anonymous RPC that finalized sessions based on elapsed time.
+drop function if exists public.finalize_expired_quiz_session(uuid);
 
 alter table public.quiz_templates enable row level security;
 alter table public.quiz_questions enable row level security;
@@ -233,9 +217,6 @@ grant select, insert, update, delete on public.quiz_questions to service_role;
 grant select, insert, update, delete on public.quiz_answer_choices to service_role;
 grant select, insert, update, delete on public.quiz_attempts to service_role;
 grant select, insert, update, delete on public.quiz_attempt_answers to service_role;
-
-grant execute on function public.finalize_expired_quiz_session(uuid)
-to anon, authenticated, service_role;
 
 drop policy if exists "Anon can manage quiz templates" on public.quiz_templates;
 drop policy if exists "Anon can read active quiz templates" on public.quiz_templates;

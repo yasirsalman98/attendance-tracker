@@ -8,7 +8,6 @@ import { getQuizResultSummary } from '../quizResultsUtils';
 import {
   canDeleteSavedQuizResults,
   canUseSavedQuizLibrary,
-  getSavedQuizDraftLabel,
   isSettingsAdminUser,
   normalizeEmail,
 } from '../userFeatureAccess';
@@ -34,21 +33,6 @@ function formatDate(value) {
   if (Number.isNaN(date.getTime())) return value;
 
   return date.toLocaleDateString();
-}
-
-function formatDuration(minutes) {
-  const duration = Number(minutes || 0);
-
-  if (duration === 1) return '1 minute';
-  if (duration < 60) return `${duration} minutes`;
-
-  const hours = Math.floor(duration / 60);
-  const remainingMinutes = duration % 60;
-  const hourLabel = hours === 1 ? '1 hour' : `${hours} hours`;
-
-  return remainingMinutes
-    ? `${hourLabel} ${remainingMinutes} min`
-    : hourLabel;
 }
 
 async function getCurrentUser() {
@@ -344,7 +328,7 @@ function shouldKeepExistingSavedQuizBehavior(user) {
 function getSavedQuizOptionLabel(quiz) {
   return `${quiz.course_name || 'Untitled Course'} - ${
     quiz.quiz_title || 'Untitled Quiz'
-  }${quiz.is_active ? '' : ` (${getSavedQuizDraftLabel(quiz)})`}`;
+  }`;
 }
 
 function cleanFileName(value, fallback = 'quiz-results') {
@@ -393,7 +377,6 @@ function buildQuizResultsPdf(quiz, attempts) {
       ['Quiz', quiz.quiz_title || 'Untitled Quiz'],
       ['Class Date', formatDate(quiz.class_date)],
       ['Passing Score', `${quiz.passing_score ?? 0}%`],
-      ['Time Limit', formatDuration(quiz.quiz_duration_minutes || 30)],
       ['Total Attempts', String(attempts.length)],
       ['Class Average', `${summary.averagePercentage.toFixed(2)}%`],
       ['Passed', String(summary.passCount)],
@@ -1282,7 +1265,6 @@ export default function Quizzes() {
                     <div className="active-quiz-meta">
                       <span>{formatDate(quiz.class_date)}</span>
                       <span>Passing: {quiz.passing_score}%</span>
-                      <span>Time: {formatDuration(quiz.quiz_duration_minutes || 30)}</span>
                     </div>
                   </div>
                   <div className="active-quiz-actions">

@@ -176,6 +176,10 @@ export default function CreateTrainingSession() {
           throw new Error(`Unable to load training session: ${error.message}`);
         }
 
+        if (data?.attendance_archived_at) {
+          throw new Error('This training session was deleted.');
+        }
+
         const canViewSession =
           isSettingsAdminUser(userData.user) ||
           data?.owner_user_id === userData.user.id;
@@ -231,7 +235,7 @@ export default function CreateTrainingSession() {
         }
 
         const activeSessionSelect =
-          'id, course_name, training_date, company_name, expires_at, owner_user_id, created_at, archived_at';
+          'id, course_name, training_date, company_name, expires_at, owner_user_id, created_at, attendance_archived_at';
         const fallbackSessionSelect =
           'id, course_name, training_date, company_name, expires_at, owner_user_id, created_at';
 
@@ -248,7 +252,7 @@ export default function CreateTrainingSession() {
           }
 
           if (includeArchiveFilter) {
-            query = query.is('archived_at', null);
+            query = query.is('attendance_archived_at', null);
           }
 
           return query;
@@ -364,7 +368,7 @@ export default function CreateTrainingSession() {
     if (!session?.id || session.isTemporaryPreview) return;
 
     const confirmed = window.confirm(
-      `Delete this live session?\n\n${session.course_name || 'Untitled Training Session'}\n\nStudents will no longer be able to sign in with this attendance link. Existing attendance records will not be deleted.`
+      `Delete this live session?\n\n${session.course_name || 'Untitled Training Session'}\n\nThis session will be removed from all session lists and students will no longer be able to use its attendance link.`
     );
 
     if (!confirmed) return;
@@ -393,7 +397,7 @@ export default function CreateTrainingSession() {
     if (!createdSession?.id) return;
 
     const confirmed = window.confirm(
-      `Delete this session?\n\n${createdSession.course_name || 'Untitled Training Session'}\n\nStudents will no longer be able to sign in with this attendance link. Existing attendance records will not be deleted.`
+      `Delete this session?\n\n${createdSession.course_name || 'Untitled Training Session'}\n\nThis session will be removed from all session lists and students will no longer be able to use its attendance link.`
     );
 
     if (!confirmed) return;

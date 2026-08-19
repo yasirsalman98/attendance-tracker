@@ -54,7 +54,8 @@ as $$
         (p_archived and record.archived_at is not null)
         or (not p_archived and record.archived_at is null)
       )
-    where p_owner_ids is null or session.owner_user_id = any(p_owner_ids)
+    where (p_owner_ids is null or session.owner_user_id = any(p_owner_ids))
+      and (p_archived or session.attendance_archived_at is null)
     group by session.id
   )
   select

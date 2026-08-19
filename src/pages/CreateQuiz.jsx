@@ -99,6 +99,50 @@ function formatAttendanceSessionOption(session) {
   return parts.join(' - ');
 }
 
+function sortAttendanceSessionsNewestFirst(sessions) {
+  return [...sessions].sort((left, right) => {
+    const dateOrder = String(right.training_date || '').localeCompare(
+      String(left.training_date || '')
+    );
+
+    if (dateOrder !== 0) return dateOrder;
+
+    return String(right.created_at || '').localeCompare(
+      String(left.created_at || '')
+    );
+  });
+}
+
+function orderAttendanceSessionChoices(sessions) {
+  const now = Date.now();
+  const sortedSessions = sortAttendanceSessionsNewestFirst(sessions);
+  const activeSessions = sortedSessions.filter((session) => {
+    const expiresAt = Date.parse(session?.expires_at || '');
+    return !Number.isFinite(expiresAt) || expiresAt > now;
+  });
+  const completedSessions = sortedSessions
+    .filter((session) => {
+      const expiresAt = Date.parse(session?.expires_at || '');
+      return (
+        Number.isFinite(expiresAt) &&
+        expiresAt <= now &&
+        (session?.signedInCount || 0) > 0
+      );
+    })
+    .sort((left, right) => {
+      const attendanceOrder = String(right.lastAttendanceAt || '').localeCompare(
+        String(left.lastAttendanceAt || '')
+      );
+
+      if (attendanceOrder !== 0) return attendanceOrder;
+      return String(right.created_at || '').localeCompare(
+        String(left.created_at || '')
+      );
+    });
+
+  return [...activeSessions, ...completedSessions];
+}
+
 function normalizeQuestionType(questionType) {
   return questionType === 'multiple_choice' ? 'multiple_choice' : 'single_choice';
 }
@@ -407,6 +451,9 @@ function mergeSavedQuizLists(ownQuizzes, sharedQuizzes) {
 
 export default function CreateQuiz() {
   const qrCodeRef = useRef(null);
+  const attendanceSessionDropdownRef = useRef(null);
+  const attendanceSessionSearchRef = useRef(null);
+  const attendanceSessionRequestIdRef = useRef(0);
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [courseName, setCourseName] = useState('');
@@ -432,6 +479,11 @@ export default function CreateQuiz() {
   const [isLoadingActiveQuizzes, setIsLoadingActiveQuizzes] = useState(false);
   const [attendanceSessions, setAttendanceSessions] = useState([]);
   const [selectedAttendanceSessionId, setSelectedAttendanceSessionId] = useState('');
+  const [selectedAttendanceSessionSnapshot, setSelectedAttendanceSessionSnapshot] =
+    useState(null);
+  const [attendanceSessionSearch, setAttendanceSessionSearch] = useState('');
+  const [isAttendanceSessionDropdownOpen, setIsAttendanceSessionDropdownOpen] =
+    useState(false);
   const [isLoadingAttendanceSessions, setIsLoadingAttendanceSessions] =
     useState(false);
   const [attendanceSessionsError, setAttendanceSessionsError] = useState('');
@@ -450,8 +502,12 @@ export default function CreateQuiz() {
     () =>
       attendanceSessions.find(
         (session) => session.id === selectedAttendanceSessionId
-      ) || null,
-    [attendanceSessions, selectedAttendanceSessionId]
+      ) || selectedAttendanceSessionSnapshot,
+    [
+      attendanceSessions,
+      selectedAttendanceSessionId,
+      selectedAttendanceSessionSnapshot,
+    ]
   );
 
   const studentQuizLink = useMemo(() => {
@@ -470,7 +526,11 @@ export default function CreateQuiz() {
     () => getQuizResultSummary(liveQuizForResults, liveAttempts),
     [liveAttempts, liveQuizForResults]
   );
-  const loadAttendanceSessions = useCallback(async function loadAttendanceSessions() {
+  const loadAttendanceSessions = useCallback(async function loadAttendanceSessions(
+    searchTerm = ''
+  ) {
+    const requestId = attendanceSessionRequestIdRef.current + 1;
+    attendanceSessionRequestIdRef.current = requestId;
     setIsLoadingAttendanceSessions(true);
     setAttendanceSessionsError('');
 
@@ -485,7 +545,14 @@ export default function CreateQuiz() {
       }
 
       try {
-        const response = await fetch(getAttendanceRecordsUrl(), {
+        const query = new URLSearchParams({
+          view: 'session-picker',
+          limit: searchTerm ? '25' : '5',
+        });
+
+        if (searchTerm) query.set('search', searchTerm);
+
+        const response = await fetch(`${getAttendanceRecordsUrl()}?${query}`, {
           headers: {
             Authorization: `Bearer ${accessToken}`,
           },
@@ -494,22 +561,12 @@ export default function CreateQuiz() {
 
         if (response.ok && contentType.includes('application/json')) {
           const data = await response.json().catch(() => null);
-          const records = data?.records || [];
-          const signedInCounts = new Map();
-
-          records.forEach((record) => {
-            if (!record.training_session_id) return;
-            signedInCounts.set(
-              record.training_session_id,
-              (signedInCounts.get(record.training_session_id) || 0) + 1
-            );
-          });
-
+          if (requestId !== attendanceSessionRequestIdRef.current) return;
           setAttendanceSessions(
-            (data?.sessions || []).map((session) => ({
-              ...session,
-              signedInCount: signedInCounts.get(session.id) || 0,
-            }))
+            orderAttendanceSessionChoices(data?.sessions || []).slice(
+              0,
+              searchTerm ? 25 : 5
+            )
           );
           return;
         }
@@ -528,74 +585,101 @@ export default function CreateQuiz() {
         );
       }
 
-      const selectAttendanceRecords = (includeArchiveFilter) => {
+      const selectAttendanceSessions = (includeArchiveFilter) => {
         let query = supabase
-          .from('attendance_records')
+          .from('training_sessions')
           .select(
-            `
-              training_session_id,
-              training_sessions (
-                id,
-                course_name,
-                training_date,
-                company_name,
-                trainer_name,
-                owner_user_id,
-                expires_at,
-                created_at
-              )
-            `
+            `id, course_name, training_date, company_name, trainer_name,
+             owner_user_id, expires_at, created_at${includeArchiveFilter ? ', attendance_archived_at' : ''}`
           )
-          .order('signed_at', { ascending: false });
+          .order('training_date', { ascending: false })
+          .order('created_at', { ascending: false })
+          .limit(1000);
+
+        if (!isSettingsAdminUser(user)) {
+          query = query.eq('owner_user_id', user.id);
+        }
 
         if (includeArchiveFilter) {
-          query = query.is('archived_at', null);
+          query = query.is('attendance_archived_at', null);
+        }
+
+        if (searchTerm) {
+          const cleanSearchTerm = searchTerm
+            .replace(/[,%_()"'\\]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          const pattern = `%${cleanSearchTerm}%`;
+          query = query.or(
+            `course_name.ilike.${pattern},company_name.ilike.${pattern},trainer_name.ilike.${pattern}`
+          );
         }
 
         return query;
       };
 
-      let { data, error } = await selectAttendanceRecords(true);
+      let { data, error } = await selectAttendanceSessions(true);
 
       if (isMissingArchiveColumn(error)) {
-        const fallbackResponse = await selectAttendanceRecords(false);
+        const fallbackResponse = await selectAttendanceSessions(false);
         data = fallbackResponse.data;
         error = fallbackResponse.error;
       }
 
       if (error) throw error;
 
-      const sessionsById = new Map();
+      const sessions = data || [];
+      const sessionIds = sessions.map((session) => session.id).filter(Boolean);
+      const signedInCounts = new Map();
+      const lastAttendanceBySessionId = new Map();
 
-      (data || []).forEach((record) => {
-        const session = record.training_sessions;
+      if (sessionIds.length > 0) {
+        const { data: attendanceRows, error: attendanceError } = await supabase
+          .from('attendance_records')
+          .select('training_session_id, signed_at')
+          .in('training_session_id', sessionIds);
 
-        if (!session?.id) return;
-        if (!isSettingsAdminUser(user) && session.owner_user_id !== user.id) return;
+        if (!attendanceError) {
+          (attendanceRows || []).forEach((record) => {
+            signedInCounts.set(
+              record.training_session_id,
+              (signedInCounts.get(record.training_session_id) || 0) + 1
+            );
+            const currentLastAttendance =
+              lastAttendanceBySessionId.get(record.training_session_id) || '';
 
-        const current = sessionsById.get(session.id);
+            if ((record.signed_at || '') > currentLastAttendance) {
+              lastAttendanceBySessionId.set(
+                record.training_session_id,
+                record.signed_at || ''
+              );
+            }
+          });
+        }
+      }
 
-        sessionsById.set(session.id, {
-          ...session,
-          signedInCount: (current?.signedInCount || 0) + 1,
-        });
-      });
-
+      if (requestId !== attendanceSessionRequestIdRef.current) return;
       setAttendanceSessions(
-        [...sessionsById.values()].sort((left, right) => {
-          const leftDate = left.training_date || '';
-          const rightDate = right.training_date || '';
-          return rightDate.localeCompare(leftDate);
-        })
+        orderAttendanceSessionChoices(
+          sessions
+            .map((session) => ({
+              ...session,
+              signedInCount: signedInCounts.get(session.id) || 0,
+              lastAttendanceAt: lastAttendanceBySessionId.get(session.id) || '',
+            }))
+        ).slice(0, searchTerm ? 25 : 5)
       );
     } catch (error) {
+      if (requestId !== attendanceSessionRequestIdRef.current) return;
       console.error('Load attendance sessions error:', error);
       setAttendanceSessions([]);
       setAttendanceSessionsError(
         error?.message || 'Unable to load attendance sessions.'
       );
     } finally {
-      setIsLoadingAttendanceSessions(false);
+      if (requestId === attendanceSessionRequestIdRef.current) {
+        setIsLoadingAttendanceSessions(false);
+      }
     }
   }, []);
 
@@ -606,6 +690,35 @@ export default function CreateQuiz() {
 
     return () => window.clearTimeout(timerId);
   }, [createdQuiz, isEditingSavedQuiz, loadAttendanceSessions]);
+
+  useEffect(() => {
+    if (!isAttendanceSessionDropdownOpen) return undefined;
+
+    const timerId = window.setTimeout(() => {
+      loadAttendanceSessions(attendanceSessionSearch.trim());
+    }, 250);
+
+    return () => window.clearTimeout(timerId);
+  }, [
+    attendanceSessionSearch,
+    isAttendanceSessionDropdownOpen,
+    loadAttendanceSessions,
+  ]);
+
+  useEffect(() => {
+    if (!isAttendanceSessionDropdownOpen) return undefined;
+
+    attendanceSessionSearchRef.current?.focus();
+
+    const closeDropdown = (event) => {
+      if (!attendanceSessionDropdownRef.current?.contains(event.target)) {
+        setIsAttendanceSessionDropdownOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', closeDropdown);
+    return () => document.removeEventListener('pointerdown', closeDropdown);
+  }, [isAttendanceSessionDropdownOpen]);
 
   const loadLiveSessionResults = useCallback(
     async function loadLiveSessionResults(quizId = createdQuiz?.id) {
@@ -1927,33 +2040,116 @@ export default function CreateQuiz() {
                 </div>
 
                 <div className="form-group">
-                  <label htmlFor="attendanceSessionId">Attendance Session</label>
-                  <select
-                    id="attendanceSessionId"
-                    value={selectedAttendanceSessionId}
-                    onChange={(event) =>
-                      setSelectedAttendanceSessionId(event.target.value)
-                    }
-                    disabled={isLoadingAttendanceSessions}
+                  <label id="attendanceSessionLabel">Attendance Session</label>
+                  <div
+                    className="attendance-session-combobox"
+                    ref={attendanceSessionDropdownRef}
                   >
-                    <option value="">
-                      {isLoadingAttendanceSessions
-                        ? 'Loading attendance sessions...'
-                        : 'No attendance session'}
-                    </option>
-                    {attendanceSessions.map((session) => (
-                      <option key={session.id} value={session.id}>
-                        {formatAttendanceSessionOption(session)}
-                      </option>
-                    ))}
-                  </select>
+                    <button
+                      id="attendanceSessionButton"
+                      type="button"
+                      className={`attendance-session-combobox-trigger${
+                        selectedAttendanceSession ? '' : ' is-empty'
+                      }`}
+                      aria-labelledby="attendanceSessionLabel attendanceSessionButton"
+                      aria-haspopup="listbox"
+                      aria-expanded={isAttendanceSessionDropdownOpen}
+                      onClick={() =>
+                        setIsAttendanceSessionDropdownOpen((isOpen) => !isOpen)
+                      }
+                    >
+                      {selectedAttendanceSession ? (
+                        <span>
+                          {formatAttendanceSessionOption(selectedAttendanceSession)}
+                        </span>
+                      ) : (
+                        <span className="attendance-session-placeholder">
+                          <span>Choose an attendance session</span>
+                          <span className="attendance-session-optional-badge">
+                            Optional
+                          </span>
+                        </span>
+                      )}
+                      <span aria-hidden="true" className="combobox-chevron">⌄</span>
+                    </button>
+
+                    {isAttendanceSessionDropdownOpen && (
+                      <div className="attendance-session-combobox-menu">
+                        <input
+                          ref={attendanceSessionSearchRef}
+                          type="search"
+                          className="attendance-session-search"
+                          value={attendanceSessionSearch}
+                          onChange={(event) =>
+                            setAttendanceSessionSearch(event.target.value)
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === 'Escape') {
+                              setIsAttendanceSessionDropdownOpen(false);
+                            }
+                          }}
+                          placeholder="Search by class, company, or instructor..."
+                          aria-label="Search attendance sessions"
+                        />
+
+                        <div className="attendance-session-options" role="listbox">
+                          <button
+                            type="button"
+                            role="option"
+                            aria-selected={!selectedAttendanceSessionId}
+                            className="attendance-session-option attendance-session-none-option"
+                            onClick={() => {
+                              setSelectedAttendanceSessionId('');
+                              setSelectedAttendanceSessionSnapshot(null);
+                              setAttendanceSessionSearch('');
+                              setIsAttendanceSessionDropdownOpen(false);
+                            }}
+                          >
+                            <span>Continue without an attendance session</span>
+                            <small>Quiz results will not be linked to attendance.</small>
+                          </button>
+
+                          {attendanceSessions.map((session) => (
+                            <button
+                              type="button"
+                              role="option"
+                              aria-selected={session.id === selectedAttendanceSessionId}
+                              className="attendance-session-option"
+                              key={session.id}
+                              onClick={() => {
+                                setSelectedAttendanceSessionId(session.id);
+                                setSelectedAttendanceSessionSnapshot(session);
+                                setAttendanceSessionSearch('');
+                                setIsAttendanceSessionDropdownOpen(false);
+                              }}
+                            >
+                              {formatAttendanceSessionOption(session)}
+                            </button>
+                          ))}
+
+                          {!isLoadingAttendanceSessions &&
+                            attendanceSessions.length === 0 && (
+                              <p className="attendance-session-empty">
+                                No matching attendance sessions found.
+                              </p>
+                            )}
+                        </div>
+
+                        {isLoadingAttendanceSessions && (
+                          <p className="attendance-session-loading">
+                            Loading attendance sessions...
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {attendanceSessionsError && (
                   <p className="form-helper is-error">{attendanceSessionsError}</p>
                 )}
 
-                {selectedAttendanceSession ? (
+                {selectedAttendanceSession && (
                   <dl className="selected-attendance-session">
                     <div className="selected-attendance-session-wide">
                       <dt>Connected to</dt>
@@ -1975,10 +2171,6 @@ export default function CreateQuiz() {
                       <dd>{selectedAttendanceSession.signedInCount || 0}</dd>
                     </div>
                   </dl>
-                ) : (
-                  <p className="form-helper">
-                    You can publish without connecting an attendance session.
-                  </p>
                 )}
               </section>
             )}

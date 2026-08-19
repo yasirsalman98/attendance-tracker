@@ -84,7 +84,7 @@ function buildCloseSessionPayload() {
   const closedAt = new Date().toISOString();
 
   return {
-    archived_at: closedAt,
+    attendance_archived_at: closedAt,
     expires_at: closedAt,
   };
 }
@@ -540,6 +540,127 @@ export async function handler(event) {
   const view = String(query.view || 'summaries').trim().toLowerCase();
   const archiveMode = String(query.archived || '').toLowerCase() === 'true';
 
+  if (view === 'session-picker') {
+    const rawSearch = String(query.search || '').trim();
+    const search = rawSearch
+      .replace(/[,%_()"'\\]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 100);
+    const requestedLimit = Number.parseInt(query.limit, 10);
+    const limit = Math.min(
+      Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 5, 1),
+      search ? 25 : 5
+    );
+    const accessibleOwnerIds = [
+      ...new Set([userData.user.id, ...sharedAttendanceOwnerIds]),
+    ];
+    const sessionPickerFields = `${SESSION_SUMMARY_FIELDS}, attendance_archived_at`;
+
+    const selectSessions = (includeArchiveFilter) => {
+      let sessionsQuery = adminClient
+        .from('training_sessions')
+        .select(includeArchiveFilter ? sessionPickerFields : SESSION_SUMMARY_FIELDS)
+        .order('training_date', { ascending: false })
+        .order('created_at', { ascending: false })
+        .limit(1000);
+
+      if (!isSettingsAdmin) {
+        sessionsQuery = sessionsQuery.in('owner_user_id', accessibleOwnerIds);
+      }
+
+      if (includeArchiveFilter) {
+        sessionsQuery = sessionsQuery.is('attendance_archived_at', null);
+      }
+
+      if (search) {
+        const pattern = `%${search}%`;
+        sessionsQuery = sessionsQuery.or(
+          `course_name.ilike.${pattern},company_name.ilike.${pattern},trainer_name.ilike.${pattern}`
+        );
+      }
+
+      return sessionsQuery;
+    };
+
+    let sessionsResponse = await selectSessions(true);
+
+    if (isMissingArchiveColumn(sessionsResponse.error)) {
+      sessionsResponse = await selectSessions(false);
+    }
+
+    if (sessionsResponse.error) {
+      console.error('Attendance session picker load error:', sessionsResponse.error);
+      return jsonResponse(500, { error: 'Unable to load attendance sessions.' });
+    }
+
+    const sessions = sessionsResponse.data || [];
+    const sessionIds = sessions.map((session) => session.id).filter(Boolean);
+    const signedInCounts = new Map();
+    const lastAttendanceBySessionId = new Map();
+
+    if (sessionIds.length > 0) {
+      const selectAttendanceCounts = (includeArchiveFilter) => {
+        let recordsQuery = adminClient
+          .from('attendance_records')
+          .select('training_session_id, signed_at')
+          .in('training_session_id', sessionIds);
+
+        if (includeArchiveFilter) {
+          recordsQuery = recordsQuery.is('archived_at', null);
+        }
+
+        return recordsQuery;
+      };
+      let recordsResponse = await selectAttendanceCounts(true);
+
+      if (isMissingArchiveColumn(recordsResponse.error)) {
+        recordsResponse = await selectAttendanceCounts(false);
+      }
+
+      if (recordsResponse.error) {
+        console.error('Attendance session picker count error:', recordsResponse.error);
+      } else {
+        (recordsResponse.data || []).forEach((record) => {
+          const sessionId = record.training_session_id;
+          signedInCounts.set(sessionId, (signedInCounts.get(sessionId) || 0) + 1);
+          const currentLastAttendance = lastAttendanceBySessionId.get(sessionId) || '';
+
+          if ((record.signed_at || '') > currentLastAttendance) {
+            lastAttendanceBySessionId.set(sessionId, record.signed_at || '');
+          }
+        });
+      }
+    }
+
+    const now = Date.now();
+    const availableSessions = sessions.map((session) => ({
+        ...session,
+        signedInCount: signedInCounts.get(session.id) || 0,
+        lastAttendanceAt: lastAttendanceBySessionId.get(session.id) || '',
+      }));
+    const activeSessions = availableSessions.filter((session) => {
+      const expiresAt = Date.parse(session.expires_at || '');
+      return !Number.isFinite(expiresAt) || expiresAt > now;
+    });
+    const completedSessions = availableSessions
+      .filter((session) => {
+        const expiresAt = Date.parse(session.expires_at || '');
+        return Number.isFinite(expiresAt) && expiresAt <= now && session.signedInCount > 0;
+      })
+      .sort((left, right) => {
+        const attendanceOrder = String(right.lastAttendanceAt).localeCompare(
+          String(left.lastAttendanceAt)
+        );
+
+        if (attendanceOrder !== 0) return attendanceOrder;
+        return String(right.created_at || '').localeCompare(String(left.created_at || ''));
+      });
+    const visibleSessions = [...activeSessions, ...completedSessions].slice(0, limit);
+
+    return jsonResponse(200, { sessions: visibleSessions });
+  }
+
   if (view === 'trainer-signature') {
     const sessionId = String(query.sessionId || '').trim();
 
@@ -820,6 +941,29 @@ export async function handler(event) {
         code: rpcResponse.error.code || null,
       });
       return rpcResponse;
+    }
+
+    if (mode === 'active' && rawSessions.length > 0) {
+      const sessionIds = rawSessions.map((session) => session.id).filter(Boolean);
+      const visibilityResponse = await adminClient
+        .from('training_sessions')
+        .select('id, attendance_archived_at')
+        .in('id', sessionIds);
+
+      if (!isMissingArchiveColumn(visibilityResponse.error)) {
+        if (visibilityResponse.error) return visibilityResponse;
+
+        const visibleSessionIds = new Set(
+          (visibilityResponse.data || [])
+            .filter((session) => !session.attendance_archived_at)
+            .map((session) => session.id)
+        );
+        const visibleSessions = rawSessions.filter((session) =>
+          visibleSessionIds.has(session.id)
+        );
+        totalCount = Math.max(0, totalCount - (rawSessions.length - visibleSessions.length));
+        rawSessions = visibleSessions;
+      }
     }
 
     if (mode === 'archived') {

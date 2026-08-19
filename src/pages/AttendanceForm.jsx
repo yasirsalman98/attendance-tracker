@@ -286,7 +286,7 @@ export default function AttendanceForm() {
         console.error('Load training session error:', error);
         setSessionDetails(null);
         setSessionError('Invalid attendance link. Please use the link provided by your instructor. / Enlace de asistencia no valido. Use el enlace proporcionado por su instructor.');
-      } else if (!data) {
+      } else if (!data || data.attendance_archived_at) {
         setSessionDetails(null);
         setSessionError('Invalid attendance link. Please use the link provided by your instructor. / Enlace de asistencia no valido. Use el enlace proporcionado por su instructor.');
       } else {

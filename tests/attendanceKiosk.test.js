@@ -31,3 +31,9 @@ test('kiosk mode confirms briefly and resets only after a successful insert', ()
   );
   assert.match(attendanceSource, /window\.clearTimeout\(kioskResetTimerRef\.current\)/);
 });
+
+test('deleted sessions are excluded from instructor lists and attendance links', () => {
+  assert.match(sessionSource, /data\?\.attendance_archived_at/);
+  assert.match(sessionSource, /query\.is\('attendance_archived_at', null\)/);
+  assert.match(attendanceSource, /!data \|\| data\.attendance_archived_at/);
+});
